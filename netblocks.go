@@ -98,12 +98,12 @@ func DownloadMaxmindFiles(data_folder string) (err error) {
 	}
 
 	for _, url := range MAXMIND_URLS {
-		filepath := path.Base(url)
-		err := HTTPDownloadFile(url, filepath)
+		target_filepath := data_folder + path.Base(url)
+		err := HTTPDownloadFile(url, target_filepath)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Downloaded %v to %v", url, filepath)
+		fmt.Printf("Downloaded %v to %v\n", url, target_filepath)
 	}
 
 	return nil
@@ -136,12 +136,12 @@ func DownloadRIRFiles(data_folder string) (err error) {
 	)
 
 	for _, rir := range RIRS {
-		filepath := path.Base(rir.URL)
-		err := HTTPDownloadFile(rir.URL, filepath)
+		target_filepath := data_folder + path.Base(rir.URL)
+		err := HTTPDownloadFile(rir.URL, target_filepath)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Downloaded %v data from %v to %v", rir.Name, rir.URL, filepath)
+		fmt.Printf("Downloaded %v data from %v to %v\n", rir.Name, rir.URL, target_filepath)
 	}
 
 	return nil
@@ -157,12 +157,12 @@ func DownloadLIRFiles(data_folder string) (err error) {
 	}
 
 	for _, url := range LIR_URLS {
-		filepath := path.Base(url)
-		err := HTTPDownloadFile(url, filepath)
+		target_filepath := data_folder + path.Base(url)
+		err := HTTPDownloadFile(url, target_filepath)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Downloaded %v to %v", url, filepath)
+		fmt.Printf("Downloaded %v to %v\n", url, target_filepath)
 	}
 
 	return nil
@@ -177,23 +177,25 @@ func DownloadASNAssignments(data_folder string) (err error) {
 	}
 
 	for _, url := range ASN_ASSIGNMENT_URLS {
-		filepath := path.Base(url)
-		err := HTTPDownloadFile(url, filepath)
+		target_filepath := data_folder + path.Base(url)
+		err := HTTPDownloadFile(url, target_filepath)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Downloaded %v to %v", url, filepath)
+		fmt.Printf("Downloaded %v to %v\n", url, target_filepath)
 	}
 
 	return nil
 }
 
 func InitializeDatabases() {
+    fmt.Println("Initializing Databases")
 	default_data_folder := "data/"
 	DownloadMaxmindFiles(default_data_folder)
 	DownloadRIRFiles(default_data_folder)
 	DownloadLIRFiles(default_data_folder)
-	DownloadASNAssignments(default_data_folder)
+    DownloadASNAssignments(default_data_folder)
+    fmt.Println("Database Initialization Complete")
 }
 
 func QueryByCountryCode(country_code string) string {
