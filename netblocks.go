@@ -257,5 +257,5 @@ func main() {
 		return
 	}
 
-	fmt.Printf(QueryByCountryCode(country_code))
+	fmt.Printf("Country Code = %v\n", QueryByCountryCode(country_code))
 }
