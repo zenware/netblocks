@@ -23,7 +23,7 @@ var COUNTRY_CODE_URL = []string{
 // Download RIR and other stuff
 // We Need a GeoIP Database, either one of our own, or supplemented by some external source
 func HTTPDownloadFile(http_uri string, target_filepath string) (err error) {
-	// NOTE: From this answer https://stackoverflow.com/a/33853856
+    // NOTE: From this answer https://stackoverflow.com/a/33853856
 	out, err := os.Create(target_filepath)
 	if err != nil {
 		return err
@@ -91,7 +91,7 @@ func FTPDownloadFile(ftp_uri string, target_filepath string) (err error) {
 }
 
 func DownloadMaxmindFiles(data_folder string) (err error) {
-	//https://stackoverflow.com/questions/11692860/how-can-i-efficiently-download-a-large-file-using-go
+    // TODO: Find a new source for this information, this domain seems to be down.
 	var MAXMIND_URLS = []string{
 		"http://geolite.maxmind.com/download/geoip/database/GeoIPCountryCSV.zip",
 		"http://geolite.maxmind.com/download/geoip/database/GeoIPv6.csv.gz",
@@ -101,6 +101,7 @@ func DownloadMaxmindFiles(data_folder string) (err error) {
 		target_filepath := data_folder + path.Base(url)
 		err := HTTPDownloadFile(url, target_filepath)
 		if err != nil {
+            fmt.Printf("%v", err)
 			return err
 		}
 		fmt.Printf("Downloaded %v to %v\n", url, target_filepath)
@@ -139,6 +140,7 @@ func DownloadRIRFiles(data_folder string) (err error) {
 		target_filepath := data_folder + path.Base(rir.URL)
 		err := HTTPDownloadFile(rir.URL, target_filepath)
 		if err != nil {
+            fmt.Printf("%v\n", err)
 			return err
 		}
 		fmt.Printf("Downloaded %v data from %v to %v\n", rir.Name, rir.URL, target_filepath)
@@ -160,6 +162,7 @@ func DownloadLIRFiles(data_folder string) (err error) {
 		target_filepath := data_folder + path.Base(url)
 		err := HTTPDownloadFile(url, target_filepath)
 		if err != nil {
+            fmt.Printf("%v\n", err)
 			return err
 		}
 		fmt.Printf("Downloaded %v to %v\n", url, target_filepath)
@@ -180,6 +183,7 @@ func DownloadASNAssignments(data_folder string) (err error) {
 		target_filepath := data_folder + path.Base(url)
 		err := HTTPDownloadFile(url, target_filepath)
 		if err != nil {
+            fmt.Printf("%v\n", err)
 			return err
 		}
 		fmt.Printf("Downloaded %v to %v\n", url, target_filepath)
@@ -188,14 +192,27 @@ func DownloadASNAssignments(data_folder string) (err error) {
 	return nil
 }
 
-func InitializeDatabases() {
+func InitializeDatabases() (err error) {
     fmt.Println("Initializing Databases")
-	default_data_folder := "data/"
+    default_data_folder := "data/"
+    
+    if _, err := os.Stat(default_data_folder); os.IsNotExist(err) {
+        // NOTE: Numbers can automatically coerce to os.FileMode?
+        fmt.Printf("Data folder (%v) does not exist, attempting to create it automatically...\n", default_data_folder)
+        err := os.MkdirAll(default_data_folder, 0777)
+        if err != nil {
+            fmt.Printf("Unable to create data folder (%v)\n", default_data_folder)
+            return err
+        }
+    }
+
 	DownloadMaxmindFiles(default_data_folder)
 	DownloadRIRFiles(default_data_folder)
 	DownloadLIRFiles(default_data_folder)
     DownloadASNAssignments(default_data_folder)
     fmt.Println("Database Initialization Complete")
+
+    return nil
 }
 
 func QueryByCountryCode(country_code string) string {
