@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log" // TODO: I need to re-learn how logging in go works.
 	"net/http"
 	"net/url"
 	"os"
@@ -22,7 +22,7 @@ var COUNTRY_CODE_URL = []string{
 
 // Download RIR and other stuff
 // We Need a GeoIP Database, either one of our own, or supplemented by some external source
-func HTTPDownloadFile(http_uri string, target_filepath string) (err error) {
+func httpDownloadFile(http_uri string, target_filepath string) (err error) {
 	// NOTE: From this answer https://stackoverflow.com/a/33853856
 	out, err := os.Create(target_filepath)
 	if err != nil {
@@ -50,7 +50,7 @@ func HTTPDownloadFile(http_uri string, target_filepath string) (err error) {
 	return nil
 }
 
-func FTPDownloadFile(ftp_uri string, target_filepath string) (err error) {
+func ftpDownloadFile(ftp_uri string, target_filepath string) (err error) {
 	// NOTE: Library Option found at https://github.com/avelino/awesome-go
 	// https://github.com/jlaffaye/ftp
 	// Solution from answer https://stackoverflow.com/a/56167966/2025467
@@ -90,7 +90,7 @@ func FTPDownloadFile(ftp_uri string, target_filepath string) (err error) {
 	return nil
 }
 
-func DownloadMaxmindFiles(data_folder string) (err error) {
+func downloadMaxmindFiles(data_folder string) (err error) {
 	// TODO: Find a new source for this information, this domain seems to be down.
 	var MAXMIND_URLS = []string{
 		"http://geolite.maxmind.com/download/geoip/database/GeoIPCountryCSV.zip",
@@ -99,7 +99,7 @@ func DownloadMaxmindFiles(data_folder string) (err error) {
 
 	for _, url := range MAXMIND_URLS {
 		target_filepath := data_folder + path.Base(url)
-		err := HTTPDownloadFile(url, target_filepath)
+		err := httpDownloadFile(url, target_filepath)
 		if err != nil {
 			fmt.Printf("%v", err)
 			return err
@@ -111,7 +111,7 @@ func DownloadMaxmindFiles(data_folder string) (err error) {
 }
 
 // https://en.wikipedia.org/wiki/National_Internet_registry
-func DownloadRIRFiles(data_folder string) (err error) {
+func downloadRIRFiles(data_folder string) (err error) {
 	// Consider adding a LongName
 	// Number Resource Organization
 	// IANA
@@ -138,7 +138,7 @@ func DownloadRIRFiles(data_folder string) (err error) {
 
 	for _, rir := range RIRS {
 		target_filepath := data_folder + path.Base(rir.URL)
-		err := HTTPDownloadFile(rir.URL, target_filepath)
+		err := httpDownloadFile(rir.URL, target_filepath)
 		if err != nil {
 			fmt.Printf("%v\n", err)
 			return err
@@ -149,7 +149,7 @@ func DownloadRIRFiles(data_folder string) (err error) {
 	return nil
 }
 
-func DownloadLIRFiles(data_folder string) (err error) {
+func downloadLIRFiles(data_folder string) (err error) {
 	// an LIR is an organization that has been allocated a block of IP Addresses by an RIR and that assigns most parts of this block to its own customers.
 	// Most LIRs are service providers...
 	// Why did the original Blockfinder only have two LIR database URLs, we should try to get some more of these.
@@ -160,7 +160,7 @@ func DownloadLIRFiles(data_folder string) (err error) {
 
 	for _, url := range LIR_URLS {
 		target_filepath := data_folder + path.Base(url)
-		err := HTTPDownloadFile(url, target_filepath)
+		err := httpDownloadFile(url, target_filepath)
 		if err != nil {
 			fmt.Printf("%v\n", err)
 			return err
@@ -171,7 +171,7 @@ func DownloadLIRFiles(data_folder string) (err error) {
 	return nil
 }
 
-func DownloadASNAssignments(data_folder string) (err error) {
+func downloadASNAssignments(data_folder string) (err error) {
 	// TODO: Download these for some reason
 	// var ASN_DESCRIPTION_URL = "http://www.cidr-report.org/as2.0/autnums.html"
 
@@ -181,7 +181,7 @@ func DownloadASNAssignments(data_folder string) (err error) {
 
 	for _, url := range ASN_ASSIGNMENT_URLS {
 		target_filepath := data_folder + path.Base(url)
-		err := HTTPDownloadFile(url, target_filepath)
+		err := httpDownloadFile(url, target_filepath)
 		if err != nil {
 			fmt.Printf("%v\n", err)
 			return err
@@ -192,7 +192,7 @@ func DownloadASNAssignments(data_folder string) (err error) {
 	return nil
 }
 
-func InitializeDatabases() (err error) {
+func initializeDatabases() (err error) {
 	fmt.Println("Initializing Databases")
 	default_data_folder := "data/"
 
@@ -206,16 +206,16 @@ func InitializeDatabases() (err error) {
 		}
 	}
 
-	DownloadMaxmindFiles(default_data_folder)
-	DownloadRIRFiles(default_data_folder)
-	DownloadLIRFiles(default_data_folder)
-	DownloadASNAssignments(default_data_folder)
+	downloadMaxmindFiles(default_data_folder)
+	downloadRIRFiles(default_data_folder)
+	downloadLIRFiles(default_data_folder)
+	downloadASNAssignments(default_data_folder)
 	fmt.Println("Database Initialization Complete")
 
 	return nil
 }
 
-func QueryByCountryCode(country_code string) string {
+func queryByCountryCode(country_code string) string {
 	// Use a Sqlite3 or other fast local db
 	// Allow a config file ?
 
@@ -247,7 +247,7 @@ func main() {
 	// We would like a maxmind database, an rir database, an lir database, and a country code database
 	// Check that we have these things and if we don't then get them
 	if initialize_databases == true {
-		InitializeDatabases()
+		initializeDatabases()
 		return
 	}
 
@@ -257,5 +257,5 @@ func main() {
 		return
 	}
 
-	fmt.Printf("Country Code = %v\n", QueryByCountryCode(country_code))
+	fmt.Printf("Country Code = %v\n", queryByCountryCode(country_code))
 }
