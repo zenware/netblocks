@@ -263,6 +263,19 @@ func Erase(path string) error {
 	return nil
 }
 
+// GetMeta reads a metadata value. The bool reports whether the key exists.
+func (s *Store) GetMeta(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
 // SetMeta writes a metadata value.
 func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)`, key, value)
@@ -779,6 +792,34 @@ func (s *Store) ASNAnnouncementCount(ctx context.Context, asn uint32) (int64, er
 	var n int64
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM asn_assignments WHERE as_num=?`, int64(asn)).Scan(&n)
 	return n, err
+}
+
+// AnnouncementsForASN returns an ASN's announcements of one number type,
+// ordered by start.
+func (s *Store) AnnouncementsForASN(ctx context.Context, asn uint32, numType netutil.NumType) ([]ASNAnnouncement, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT start_hex, next_start_hex, num_type, as_num, source_type, source_name
+		FROM asn_assignments WHERE as_num=? AND num_type=? ORDER BY start_hex`, int64(asn), string(numType))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ASNAnnouncement
+	for rows.Next() {
+		var (
+			startHex, nextHex string
+			asnVal            int64
+			a                 ASNAnnouncement
+		)
+		if err := rows.Scan(&startHex, &nextHex, &a.NumType, &asnVal, &a.SourceType, &a.SourceName); err != nil {
+			return nil, err
+		}
+		a.ASN = uint32(asnVal)
+		a.Start, _ = netutil.ParseHexKey(startHex)
+		next, _ := netutil.ParseHexKey(nextHex)
+		a.End = new(big.Int).Sub(next, big.NewInt(1))
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // CountAssignments returns the number of delegation/GeoIP records.

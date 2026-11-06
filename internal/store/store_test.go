@@ -291,3 +291,88 @@ func TestSchemaMismatch(t *testing.T) {
 	}
 	st.Close()
 }
+
+func TestStoreMeta(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if value, ok, err := st.GetMeta(ctx, "missing"); err != nil || ok || value != "" {
+		t.Fatalf("missing meta = %q, %v, %v", value, ok, err)
+	}
+	if err := st.SetMeta(ctx, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok, err := st.GetMeta(ctx, "k"); err != nil || !ok || value != "v" {
+		t.Fatalf("meta = %q, %v, %v", value, ok, err)
+	}
+}
+
+func TestAnnouncementsForASN(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	insert := func(w *store.ASNWriter, cidr string, numType netutil.NumType, asn uint32, source string) error {
+		start, end := ipRange(t, cidr)
+		return w.Insert(store.ASNAnnouncement{
+			Start: start, End: end, NumType: numType, ASN: asn,
+			SourceType: "bgp_snapshot", SourceName: source,
+		})
+	}
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews", "routeviews6"}, func(w *store.ASNWriter) error {
+		if err := insert(w, "1.0.0.0/24", netutil.IPv4, 15169, "routeviews"); err != nil {
+			return err
+		}
+		if err := insert(w, "1.0.2.0/24", netutil.IPv4, 15169, "routeviews"); err != nil {
+			return err
+		}
+		if err := insert(w, "2001:db8::/32", netutil.IPv6, 15169, "routeviews6"); err != nil {
+			return err
+		}
+		return insert(w, "8.8.8.0/24", netutil.IPv4, 13335, "routeviews")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v4, err := st.AnnouncementsForASN(ctx, 15169, netutil.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v4) != 2 {
+		t.Fatalf("ipv4 announcements = %+v", v4)
+	}
+	wantStarts := []string{"1.0.0.0", "1.0.2.0"}
+	for i, ann := range v4 {
+		start, _, err := netutil.ParseAddr(wantStarts[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ann.Start.Cmp(start) != 0 {
+			t.Fatalf("announcement %d start = %s, want %s", i, ann.Start, wantStarts[i])
+		}
+		if ann.ASN != 15169 || ann.NumType != netutil.IPv4 || ann.SourceName != "routeviews" {
+			t.Fatalf("announcement %d = %+v", i, ann)
+		}
+	}
+
+	v6, err := st.AnnouncementsForASN(ctx, 15169, netutil.IPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v6) != 1 || v6[0].ASN != 15169 || v6[0].NumType != netutil.IPv6 || v6[0].SourceName != "routeviews6" {
+		t.Fatalf("ipv6 announcements = %+v", v6)
+	}
+
+	none, err := st.AnnouncementsForASN(ctx, 64500, netutil.IPv4)
+	if err != nil || len(none) != 0 {
+		t.Fatalf("unknown ASN announcements = %+v, %v", none, err)
+	}
+}

@@ -49,6 +49,8 @@ type Options struct {
 
 	IP             string
 	ASN            string
+	Prefixes       bool
+	PrefixLimit    int
 	Code           string
 	Name           string
 	Compare        string
@@ -186,6 +188,8 @@ func Run(ctx context.Context, opts Options) error {
 		return a.reservedCount(ctx)
 	case "stats":
 		return a.stats(ctx)
+	case "info":
+		return a.cacheInfo(ctx)
 	default:
 		return fmt.Errorf("unknown operation %q", opts.Mode)
 	}
@@ -804,6 +808,176 @@ func (a *App) initAll(ctx context.Context) error {
 		a.printf("\nCache initialization complete.\n")
 	}
 	return errors.Join(errs...)
+}
+
+var cacheImportKeys = []string{
+	"last_rir_import",
+	"last_lir_import",
+	"last_asn_description_import",
+	"last_asn_assignment_import",
+	"last_maxmind_import",
+}
+
+type cacheFileInfo struct {
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	Modified   string `json:"modified"`
+	AgeSeconds int64  `json:"age_seconds"`
+}
+
+type cacheInfoReport struct {
+	SchemaVersion string            `json:"schema_version"`
+	DatabasePath  string            `json:"database_path"`
+	DatabaseSize  int64             `json:"database_size"`
+	Rows          []store.Stat      `json:"rows"`
+	Imports       map[string]string `json:"imports"`
+	Files         []cacheFileInfo   `json:"files"`
+	Warnings      []string          `json:"warnings,omitempty"`
+}
+
+func (a *App) cacheInfo(ctx context.Context) error {
+	dbPath, err := filepath.Abs(a.dbPath())
+	if err != nil {
+		return err
+	}
+	st, err := a.openStore(ctx)
+	if err != nil {
+		return err
+	}
+	version, ok, err := st.GetMeta(ctx, "schema_version")
+	if err != nil {
+		return err
+	}
+	if !ok || version == "" {
+		version = store.SchemaVersion
+	}
+	imports := make(map[string]string, len(cacheImportKeys))
+	for _, key := range cacheImportKeys {
+		value, ok, err := st.GetMeta(ctx, key)
+		if err != nil {
+			return err
+		}
+		if ok {
+			imports[key] = value
+		}
+	}
+	rows, err := st.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	var dbSize int64
+	info, err := os.Stat(dbPath)
+	switch {
+	case err == nil:
+		dbSize = info.Size()
+	case errors.Is(err, os.ErrNotExist):
+	default:
+		return err
+	}
+	files := make([]cacheFileInfo, 0)
+	entries, err := os.ReadDir(a.opts.CacheDir)
+	switch {
+	case err == nil:
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "netblocks.db" || strings.HasPrefix(name, "netblocks.db-") {
+				continue
+			}
+			entryInfo, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if entryInfo.IsDir() || !entryInfo.Mode().IsRegular() {
+				continue
+			}
+			files = append(files, cacheFileInfo{
+				Name:       name,
+				Size:       entryInfo.Size(),
+				Modified:   entryInfo.ModTime().UTC().Format(time.RFC3339),
+				AgeSeconds: int64(time.Since(entryInfo.ModTime()).Seconds()),
+			})
+		}
+	case errors.Is(err, os.ErrNotExist):
+	default:
+		return err
+	}
+	var warnings []string
+	rirValue, rirPresent, err := st.GetMeta(ctx, "last_rir_import")
+	if err != nil {
+		return err
+	}
+	var rirTime time.Time
+	rirParsed := false
+	if rirPresent {
+		parsed, err := time.Parse(time.RFC3339, rirValue)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("last_rir_import has invalid timestamp %q", rirValue))
+		} else {
+			rirTime = parsed
+			rirParsed = true
+		}
+	}
+	rirFileExists := false
+	for _, src := range sources.RIRFiles {
+		name := sources.Filename(src.URL)
+		fileInfo, err := os.Stat(a.cache.Path(name))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		rirFileExists = true
+		if rirParsed && fileInfo.ModTime().UTC().Truncate(time.Second).After(rirTime) {
+			warnings = append(warnings, fmt.Sprintf("cached RIR file %s is newer than the last RIR import (%s); run `netblocks -d`", name, rirValue))
+		}
+	}
+	if rirFileExists && !rirPresent {
+		warnings = append(warnings, "cached RIR files exist but no RIR import is recorded; run `netblocks -d`")
+	}
+	if a.opts.JSON {
+		return a.writeJSON(cacheInfoReport{
+			SchemaVersion: version,
+			DatabasePath:  dbPath,
+			DatabaseSize:  dbSize,
+			Rows:          rows,
+			Imports:       imports,
+			Files:         files,
+			Warnings:      warnings,
+		})
+	}
+	a.printf("Cache database: %s\n", dbPath)
+	a.printf("Schema version: %s\n", version)
+	a.printf("Database size: %d bytes\n", dbSize)
+	a.printf("\nRows:\n")
+	a.printf("%-20s %-14s %10s\n", "SOURCE", "TYPE", "ROWS")
+	for _, row := range rows {
+		a.printf("%-20s %-14s %10d\n", row.SourceType, row.NumType, row.Count)
+	}
+	a.printf("\nImports:\n")
+	for _, key := range cacheImportKeys {
+		value, ok := imports[key]
+		if !ok {
+			value = "(none)"
+		}
+		a.printf("  %-30s  %s\n", key, value)
+	}
+	a.printf("\nCached files:\n")
+	if len(files) == 0 {
+		a.printf("  (none)\n")
+	} else {
+		for _, f := range files {
+			age := (time.Duration(f.AgeSeconds) * time.Second).Round(time.Second)
+			a.printf("  %-32s  %d bytes  %s (%s ago)\n", f.Name, f.Size, f.Modified, age)
+		}
+	}
+	if len(warnings) > 0 {
+		a.printf("\nWarnings:\n")
+		for _, warning := range warnings {
+			a.warnf("%s", warning)
+		}
+	}
+	return nil
 }
 
 func (a *App) stats(ctx context.Context) error {

@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zenware/netblocks/internal/app"
+	"github.com/zenware/netblocks/internal/netutil"
+	"github.com/zenware/netblocks/internal/store"
 )
 
 func copyFixture(t *testing.T, src, dst string) {
@@ -395,5 +398,195 @@ func TestIPv6BGPImportAndExport(t *testing.T) {
 	}
 	if !strings.Contains(string(asn6Data), "2001:db8::") || !strings.Contains(string(asn6Data), "AS15169") {
 		t.Fatalf("ipv6 ASN export = %q", asn6Data)
+	}
+}
+
+func TestASNPrefixes(t *testing.T) {
+	dir := setupCache(t)
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(dir, "netblocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(w *store.ASNWriter, cidr string, numType netutil.NumType, asn uint32, source string) error {
+		start, end, _, err := netutil.ParsePrefix(cidr)
+		if err != nil {
+			return err
+		}
+		return w.Insert(store.ASNAnnouncement{
+			Start: start, End: end, NumType: numType, ASN: asn,
+			SourceType: "bgp_snapshot", SourceName: source,
+		})
+	}
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews", "routeviews6"}, func(w *store.ASNWriter) error {
+		if err := insert(w, "8.8.8.0/24", netutil.IPv4, 15169, "routeviews"); err != nil {
+			return err
+		}
+		if err := insert(w, "8.8.4.0/22", netutil.IPv4, 15169, "routeviews"); err != nil {
+			return err
+		}
+		if err := insert(w, "2001:db8::/32", netutil.IPv6, 15169, "routeviews6"); err != nil {
+			return err
+		}
+		return insert(w, "1.1.1.0/24", netutil.IPv4, 13335, "routeviews")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	out, _, err := runApp(t, dir, app.Options{Mode: "asn", ASN: "15169", Prefixes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"AS announced prefixes: 3", "IPv4 prefixes:", "8.8.8.0/24", "8.8.4.0/22", "IPv6 prefixes:", "2001:db8::/32"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("prefix output missing %q:\n%s", want, out)
+		}
+	}
+
+	raw, _, err := runApp(t, dir, app.Options{Mode: "asn", ASN: "15169", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		AnnouncedPrefixes int64 `json:"announced_prefixes"`
+		Announcements     []struct {
+			Network    string `json:"network"`
+			Family     string `json:"family"`
+			Source     string `json:"source"`
+			SourceType string `json:"source_type"`
+		} `json:"announcements"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if decoded.AnnouncedPrefixes != 3 {
+		t.Fatalf("announced_prefixes = %d", decoded.AnnouncedPrefixes)
+	}
+	if len(decoded.Announcements) != 3 {
+		t.Fatalf("announcements = %+v", decoded.Announcements)
+	}
+	first := decoded.Announcements[0]
+	if first.Network != "8.8.4.0/22" || first.Family != "ipv4" || first.Source != "routeviews" || first.SourceType != "bgp_snapshot" {
+		t.Fatalf("first announcement = %+v", first)
+	}
+	if decoded.Announcements[1].Network != "8.8.8.0/24" {
+		t.Fatalf("second announcement = %+v", decoded.Announcements[1])
+	}
+	last := decoded.Announcements[2]
+	if last.Network != "2001:db8::/32" || last.Family != "ipv6" || last.Source != "routeviews6" {
+		t.Fatalf("ipv6 announcement = %+v", last)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "asn", ASN: "15169", Prefixes: true, PrefixLimit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "IPv4 prefixes (showing 1 of 2):") {
+		t.Fatalf("limited output = %q", out)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "asn", ASN: "64500", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if decoded.AnnouncedPrefixes != 0 {
+		t.Fatalf("announced_prefixes = %d", decoded.AnnouncedPrefixes)
+	}
+	if !strings.Contains(raw, `"announcements":[]`) {
+		t.Fatalf("empty announcements not encoded as []: %s", raw)
+	}
+}
+
+func TestCacheInfo(t *testing.T) {
+	dir := setupCache(t)
+
+	out, errOut, err := runApp(t, dir, app.Options{Mode: "info"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Cache database:", "Schema version: 2", "Database size:", "Rows:",
+		"last_rir_import", "last_lir_import", "delegated-apnic-latest", "ripe.db.inetnum.gz",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("info output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(errOut, "warning:") {
+		t.Fatalf("unexpected warnings: %s", errOut)
+	}
+
+	raw, _, err := runApp(t, dir, app.Options{Mode: "info", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		SchemaVersion string            `json:"schema_version"`
+		DatabasePath  string            `json:"database_path"`
+		DatabaseSize  int64             `json:"database_size"`
+		Rows          []store.Stat      `json:"rows"`
+		Imports       map[string]string `json:"imports"`
+		Files         []struct {
+			Name       string `json:"name"`
+			Size       int64  `json:"size"`
+			Modified   string `json:"modified"`
+			AgeSeconds int64  `json:"age_seconds"`
+		} `json:"files"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if report.SchemaVersion != "2" {
+		t.Fatalf("schema_version = %q", report.SchemaVersion)
+	}
+	if !filepath.IsAbs(report.DatabasePath) || !strings.HasSuffix(report.DatabasePath, "netblocks.db") {
+		t.Fatalf("database_path = %q", report.DatabasePath)
+	}
+	if report.Imports["last_rir_import"] == "" {
+		t.Fatalf("imports = %+v", report.Imports)
+	}
+	names := make(map[string]bool)
+	for _, f := range report.Files {
+		names[f.Name] = true
+	}
+	if !names["delegated-apnic-latest"] || !names["ripe.db.inetnum.gz"] {
+		t.Fatalf("files = %+v", report.Files)
+	}
+
+	apnic := filepath.Join(dir, "delegated-apnic-latest")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(apnic, future, future); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, err = runApp(t, dir, app.Options{Mode: "info"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut, "is newer than the last RIR import") {
+		t.Fatalf("missing stale warning: %s", errOut)
+	}
+
+	fresh := t.TempDir()
+	raw, _, err = runApp(t, fresh, app.Options{Mode: "info", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.Imports = nil
+	report.Files = nil
+	report.Warnings = nil
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if report.SchemaVersion != "2" || len(report.Imports) != 0 || len(report.Files) != 0 {
+		t.Fatalf("fresh report = %+v", report)
+	}
+	if !strings.Contains(raw, `"files":[]`) {
+		t.Fatalf("fresh files not encoded as []: %s", raw)
 	}
 }

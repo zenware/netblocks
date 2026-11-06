@@ -58,6 +58,8 @@ func run(args []string) int {
 		ipv4           string
 		ipv6           string
 		asn            string
+		prefixes       bool
+		prefixLimit    int
 		code           string
 		name           string
 		compare        string
@@ -77,6 +79,7 @@ func run(args []string) int {
 		listCC        bool
 		reservedCount bool
 		stats         bool
+		info          bool
 
 		sourceFlag    string
 		asnSourceFlag string
@@ -135,6 +138,8 @@ func run(args []string) int {
 	fs.StringVar(&ipv6, "ipv6", "", "look up the country for an IPv6 address")
 	fs.StringVar(&asn, "a", "", "look up the country and description for an ASN")
 	fs.StringVar(&asn, "asn", "", "look up the country and description for an ASN")
+	fs.BoolVar(&prefixes, "prefixes", false, "list announced prefixes in ASN lookup")
+	fs.IntVar(&prefixLimit, "prefix-limit", 0, "maximum announced prefixes listed per address family (0 = all)")
 	fs.StringVar(&code, "t", "", "list allocations for CC[:ipv4|ipv6|asn]")
 	fs.StringVar(&code, "code", "", "list allocations for CC[:ipv4|ipv6|asn]")
 	fs.StringVar(&name, "n", "", "list allocations for a country name[:type]")
@@ -158,6 +163,7 @@ func run(args []string) int {
 	fs.BoolVar(&listCC, "list-cc", false, "list known ISO country codes")
 	fs.BoolVar(&reservedCount, "reserved-count", false, "count reserved/available RIR records")
 	fs.BoolVar(&stats, "stats", false, "show cache row counts")
+	fs.BoolVar(&info, "info", false, "show cache provenance, sizes, and file ages")
 
 	fs.StringVar(&sourceFlag, "source", "", "comma-separated sources: rir,lir,maxmind,all")
 	fs.StringVar(&asnSourceFlag, "asn-source", "", "comma-separated BGP sources: routeviews,routeviews6,all")
@@ -208,6 +214,7 @@ func run(args []string) int {
 	add("list-cc", listCC)
 	add("reserved-count", reservedCount)
 	add("stats", stats)
+	add("info", info)
 	add("export-geoip", exportGeoIP)
 
 	ip4Set := set["4"] || set["ipv4"]
@@ -258,6 +265,8 @@ func run(args []string) int {
 		GeoIPASNv6File: geoASNv6,
 		IP:             firstNonEmpty(ipv4, ipv6),
 		ASN:            asn,
+		Prefixes:       prefixes,
+		PrefixLimit:    prefixLimit,
 		Code:           firstNonEmpty(code, legacyCC),
 		Name:           name,
 		Compare:        compare,
@@ -265,6 +274,14 @@ func run(args []string) int {
 		LookupOrgIP:    lookupOrgIP,
 		RangeStart:     rangeStart,
 		RangeEnd:       rangeEnd,
+	}
+	if prefixLimit < 0 {
+		fmt.Fprintln(os.Stderr, "netblocks: --prefix-limit must be >= 0")
+		return 2
+	}
+	if (prefixes || prefixLimit != 0) && opts.Mode != "asn" {
+		fmt.Fprintln(os.Stderr, "netblocks: --prefixes and --prefix-limit require -a/--asn")
+		return 2
 	}
 	if set["code"] || set["cc"] || set["t"] {
 		opts.Code, opts.TypeFilter = splitSpec(opts.Code)
@@ -368,6 +385,8 @@ Lookup modes:
   -4, --ipv4 ADDR             look up country for an IPv4 address
   -6, --ipv6 ADDR             look up country for an IPv6 address
   -a, --asn ASN               look up country/description for an ASN
+      --prefixes              list announced prefixes in ASN lookup
+      --prefix-limit N        max prefixes listed per family (0 = all)
   -t, --code CC[:type]        list allocations for a country
   -n, --name NAME[:type]      list allocations for a country name
   -p, --compare CC            compare data sources (conflicts by default)
@@ -402,6 +421,7 @@ Options:
       --list-cc               list known ISO country codes
       --reserved-count        count reserved/available RIR records
       --stats                 show cache row counts
+      --info                  show cache provenance, sizes, and file ages
       --version               print version
   -h, --help                  show this help
 

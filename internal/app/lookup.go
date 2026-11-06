@@ -38,6 +38,20 @@ type asnDetail struct {
 	Prefixes    int64  `json:"announced_prefixes,omitempty"`
 }
 
+type asnAnnouncement struct {
+	Network    string `json:"network"`
+	Family     string `json:"family"`
+	Source     string `json:"source"`
+	SourceType string `json:"source_type"`
+}
+
+type prefixGroup struct {
+	numType       netutil.NumType
+	announcements []store.ASNAnnouncement
+	total         int
+	truncated     bool
+}
+
 type ipResult struct {
 	Query    string          `json:"query"`
 	IP       string          `json:"ip"`
@@ -292,15 +306,47 @@ func (a *App) lookupASN(ctx context.Context) error {
 		result.CountryCode = assigned.CountryCode
 		result.CountryName, _ = d.Name(assigned.CountryCode)
 	}
+	var announcements []asnAnnouncement
+	var groups []prefixGroup
+	truncatedAny := false
+	if a.opts.Prefixes || a.opts.JSON {
+		announcements = make([]asnAnnouncement, 0)
+		for _, numType := range []netutil.NumType{netutil.IPv4, netutil.IPv6} {
+			list, err := st.AnnouncementsForASN(ctx, asn, numType)
+			if err != nil {
+				return err
+			}
+			group := prefixGroup{numType: numType, announcements: list, total: len(list)}
+			if a.opts.PrefixLimit > 0 && len(list) > a.opts.PrefixLimit {
+				group.announcements = list[:a.opts.PrefixLimit]
+				group.truncated = true
+				truncatedAny = true
+			}
+			groups = append(groups, group)
+			for _, ann := range group.announcements {
+				announcements = append(announcements, asnAnnouncement{
+					Network:    networkString(ann.Start, ann.End, numType),
+					Family:     string(numType),
+					Source:     ann.SourceName,
+					SourceType: ann.SourceType,
+				})
+			}
+		}
+	}
 	if a.opts.JSON {
-		return a.writeJSON(map[string]any{
+		payload := map[string]any{
 			"query":              "asn",
 			"asn":                asn,
 			"country_code":       result.CountryCode,
 			"country_name":       result.CountryName,
 			"description":        result.Description,
 			"announced_prefixes": result.Prefixes,
-		})
+			"announcements":      announcements,
+		}
+		if truncatedAny {
+			payload["announcements_truncated"] = true
+		}
+		return a.writeJSON(payload)
 	}
 	if found {
 		fmt.Fprintf(a.opts.Out, "AS country code: %s\n", result.CountryCode)
@@ -315,6 +361,21 @@ func (a *App) lookupASN(ctx context.Context) error {
 	}
 	if count > 0 {
 		fmt.Fprintf(a.opts.Out, "AS announced prefixes: %d\n", count)
+	}
+	if a.opts.Prefixes {
+		for _, group := range groups {
+			if len(group.announcements) == 0 {
+				continue
+			}
+			if group.truncated {
+				fmt.Fprintf(a.opts.Out, "%s prefixes (showing %d of %d):\n", familyLabel(group.numType), len(group.announcements), group.total)
+			} else {
+				fmt.Fprintf(a.opts.Out, "%s prefixes:\n", familyLabel(group.numType))
+			}
+			for _, ann := range group.announcements {
+				fmt.Fprintf(a.opts.Out, "  %s\n", networkString(ann.Start, ann.End, group.numType))
+			}
+		}
 	}
 	return nil
 }
@@ -525,6 +586,13 @@ func asnStrings(list []store.Assignment, expand bool) ([]uint32, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, nil
+}
+
+func familyLabel(numType netutil.NumType) string {
+	if numType == netutil.IPv6 {
+		return "IPv6"
+	}
+	return "IPv4"
 }
 
 func networkString(start, end *big.Int, numType netutil.NumType) string {
