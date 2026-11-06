@@ -77,8 +77,8 @@ the matching `reload` mode imports an already-downloaded file.
 | `-o` | `--download-cc` | Download the ISO 3166-1 country list (an embedded list is always available) |
 | `-j` | `--init-asn-descriptions` | Download and import ASN descriptions from cidr-report.org |
 | `-k` | `--reload-asn-descriptions` | Import cached ASN descriptions |
-| `-y` | `--init-asn-assignments` | Download and import a RouteViews BGP snapshot (large) |
-| `-u` | `--reload-asn-assignments` | Import a cached BGP snapshot |
+| `-y` | `--init-asn-assignments` | Download and import BGP snapshots (large; IPv4 by default) |
+| `-u` | `--reload-asn-assignments` | Import cached BGP snapshots |
 | `-e` | `--erase-cache` | Delete the local SQLite database |
 | | `--init` | Download and import every available dataset |
 
@@ -193,12 +193,13 @@ Writes:
 - `GeoIPCountryWhois.csv` — IPv4 country ranges
 - `v6.csv` — IPv6 country ranges
 - `GeoIPASNum.csv` — IPv4 ASN ranges (from BGP snapshots)
+- `GeoIPASNumv6.csv` — IPv6 ASN ranges (from BGP snapshots)
 
-Override the names with `--geoip-v4-file`, `--geoip-v6-file`, and
-`--geoip-asn-file`. Country exports default to RIR data; use `--source` to
-export LIR or MaxMind data instead. Rows are adjacent-merged per country/ASN
-and written in the standard six/five-column MaxMind format. Empty datasets
-produce a warning and no file.
+Override the names with `--geoip-v4-file`, `--geoip-v6-file`,
+`--geoip-asn-file`, and `--geoip-asn-v6-file`. Country exports default to RIR
+data; use `--source` to export LIR or MaxMind data instead. Rows are
+adjacent-merged per country/ASN and written in the standard six/five-column
+MaxMind format. Empty datasets produce a warning and no file.
 
 ## Options
 
@@ -208,6 +209,7 @@ produce a warning and no file.
     --user-agent VALUE       User-Agent used when fetching
     --json                   machine-readable output
     --source LIST            rir,lir,maxmind (or all)
+    --asn-source LIST        routeviews,routeviews6 (or all; default routeviews)
     --compare-all            show all overlaps in -p, not just conflicts
     --offline                never download
     --retries N              download retry attempts (default 3)
@@ -233,7 +235,7 @@ produce a warning and no file.
 | LACNIC | `https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-latest` |
 | RIPE LIR | `https://ftp.ripe.net/ripe/dbase/split/ripe.db.inetnum.gz`, `.../ripe.db.inet6num.gz` |
 | ASN names | `https://www.cidr-report.org/as2.0/autnums.html` |
-| BGP RIB | `https://archive.routeviews.org/oix-route-views/oix-full-snapshot-latest.dat.bz2` |
+| BGP RIB | `https://archive.routeviews.org/oix-route-views/oix-full-snapshot-latest.dat.bz2` (IPv4 text), `https://archive.routeviews.org/route-views6/bgpdata/YYYY.MM/RIBS/rib.YYYYMMDD.HHMM.bz2` (IPv6 MRT) |
 | Country list | `https://raw.githubusercontent.com/datasets/country-list/master/data.csv` |
 | MaxMind | `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=...` |
 

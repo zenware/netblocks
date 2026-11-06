@@ -74,7 +74,7 @@ func TestASNCSVMergesAdjacentSameASN(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", func(w *store.ASNWriter) error {
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews"}, func(w *store.ASNWriter) error {
 		for i, cidr := range []string{"1.0.0.0/24", "1.0.1.0/24", "1.0.2.0/24"} {
 			start, end, _, err := netutil.ParsePrefix(cidr)
 			if err != nil {

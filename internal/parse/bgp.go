@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/zenware/netblocks/internal/netutil"
+	"github.com/zenware/netblocks/internal/sources"
 	"github.com/zenware/netblocks/internal/store"
 )
 
@@ -79,8 +80,8 @@ func BGP(ctx context.Context, r io.Reader, fn func(store.ASNAnnouncement) error)
 			End:        end,
 			NumType:    numType,
 			ASN:        asn,
-			SourceType: "bgp_snapshot",
-			SourceName: "routeviews",
+			SourceType: sources.SourceBGP,
+			SourceName: sources.BGPNameRouteViews,
 		}); err != nil {
 			return stats, fmt.Errorf("line %d: %w", lineNo, err)
 		}

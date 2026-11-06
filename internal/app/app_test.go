@@ -346,3 +346,54 @@ func TestNoExpandASNs(t *testing.T) {
 		t.Fatalf("expected ASN output")
 	}
 }
+
+func TestIPv6BGPImportAndExport(t *testing.T) {
+	dir := setupCache(t)
+	copyFixture(t, "../../testdata/test_bgp_mrt.bz2", filepath.Join(dir, "route-views6-rib.bz2"))
+
+	if _, _, err := runApp(t, dir, app.Options{
+		Mode:       "reload-asn-assignments",
+		BGPSources: []string{"routeviews6"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runApp(t, dir, app.Options{Mode: "lookup-org-by-ip", LookupOrgIP: "2001:db8::1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "announced by AS15169") {
+		t.Fatalf("ipv6 lookup = %q", out)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "stats"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "bgp_snapshot") || !strings.Contains(out, "ipv6") {
+		t.Fatalf("stats = %q", out)
+	}
+
+	exportDir := t.TempDir()
+	v4 := filepath.Join(exportDir, "v4.csv")
+	v6 := filepath.Join(exportDir, "v6.csv")
+	asn4 := filepath.Join(exportDir, "asn4.csv")
+	asn6 := filepath.Join(exportDir, "asn6.csv")
+	if _, _, err := runApp(t, dir, app.Options{
+		Mode:           "export-geoip",
+		GeoIPV4File:    v4,
+		GeoIPV6File:    v6,
+		GeoIPASNFile:   asn4,
+		GeoIPASNv6File: asn6,
+		Merge:          true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	asn6Data, err := os.ReadFile(asn6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(asn6Data), "2001:db8::") || !strings.Contains(string(asn6Data), "AS15169") {
+		t.Fatalf("ipv6 ASN export = %q", asn6Data)
+	}
+}

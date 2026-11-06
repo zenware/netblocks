@@ -41,6 +41,7 @@ type Options struct {
 	Retries   int
 
 	Sources    []string
+	BGPSources []string
 	Merge      bool
 	ExpandASNs bool
 	CompareAll bool
@@ -58,9 +59,10 @@ type Options struct {
 	ImportMaxMind  string
 	MaxMindLicense string
 
-	GeoIPV4File  string
-	GeoIPV6File  string
-	GeoIPASNFile string
+	GeoIPV4File    string
+	GeoIPV6File    string
+	GeoIPASNFile   string
+	GeoIPASNv6File string
 }
 
 // App holds runtime state for one command invocation.
@@ -296,6 +298,83 @@ func ParseSources(s string) ([]string, error) {
 		return nil, errors.New("empty source list")
 	}
 	return out, nil
+}
+
+// ParseBGPSources parses and validates a comma-separated BGP source list.
+func ParseBGPSources(s string) ([]string, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []string
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(s, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" {
+			continue
+		}
+		if part == "all" {
+			for _, src := range sources.BGPSources {
+				if !seen[src.Name] {
+					seen[src.Name] = true
+					out = append(out, src.Name)
+				}
+			}
+			continue
+		}
+		if _, ok := sources.BGPSourceByName(part); !ok {
+			return nil, fmt.Errorf("unknown BGP source %q (valid: routeviews, routeviews6, all)", part)
+		}
+		if !seen[part] {
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("empty BGP source list")
+	}
+	return out, nil
+}
+
+func (a *App) bgpSources() ([]sources.BGPSource, error) {
+	names := a.opts.BGPSources
+	if len(names) == 0 {
+		names = []string{sources.BGPNameRouteViews}
+	}
+	out := make([]sources.BGPSource, 0, len(names))
+	for _, name := range names {
+		src, ok := sources.BGPSourceByName(name)
+		if !ok {
+			return nil, fmt.Errorf("unknown BGP source %q", name)
+		}
+		out = append(out, src)
+	}
+	return out, nil
+}
+
+// downloadBGPSource fetches one BGP snapshot into the cache.
+func (a *App) downloadBGPSource(ctx context.Context, src sources.BGPSource) (string, error) {
+	if src.URL != "" {
+		return a.cache.DownloadTo(ctx, src.URL, src.Filename)
+	}
+	if src.Name == sources.BGPNameRouteViews6 {
+		now := time.Now()
+		if a.opts.Offline {
+			// Offline mode only checks the stable cache filename.
+			return a.cache.DownloadTo(ctx, sources.RouteViews6RIBURL(now), src.Filename)
+		}
+		var lastErr error
+		for i := range 6 {
+			u := sources.RouteViews6RIBURL(now.Add(-time.Duration(i) * 2 * time.Hour))
+			a.logf("trying %s", u)
+			path, err := a.cache.DownloadTo(ctx, u, src.Filename)
+			if err == nil {
+				return path, nil
+			}
+			lastErr = err
+		}
+		return "", fmt.Errorf("%s: %w", src.Name, lastErr)
+	}
+	return "", fmt.Errorf("BGP source %q has no URL", src.Name)
 }
 
 func (a *App) assignmentSources(defaults []string) ([]string, error) {
@@ -534,44 +613,97 @@ func (a *App) importASNDescriptions(ctx context.Context) error {
 }
 
 func (a *App) initASNAssignments(ctx context.Context) error {
-	a.printf("Downloading BGP snapshot (large file)...\n")
-	if _, err := a.cache.Download(ctx, sources.ASNAssignmentURL); err != nil {
+	list, err := a.bgpSources()
+	if err != nil {
 		return err
 	}
-	return a.importASNAssignments(ctx)
+	for _, src := range list {
+		a.printf("Downloading %s...\n", src.Description)
+		if _, err := a.downloadBGPSource(ctx, src); err != nil {
+			return fmt.Errorf("%s: %w", src.Name, err)
+		}
+	}
+	return a.importASNAssignments(ctx, true)
 }
 
 func (a *App) reloadASNAssignments(ctx context.Context) error {
-	return a.importASNAssignments(ctx)
+	return a.importASNAssignments(ctx, false)
 }
 
-func (a *App) importASNAssignments(ctx context.Context) error {
-	path := a.cache.Path(sources.Filename(sources.ASNAssignmentURL))
-	fh, err := os.Open(path)
+func (a *App) importASNAssignments(ctx context.Context, requireAll bool) error {
+	list, err := a.bgpSources()
 	if err != nil {
-		return fmt.Errorf("no cached BGP snapshot; run `netblocks -y` first: %w", err)
+		return err
 	}
-	defer fh.Close()
+	type cached struct {
+		src  sources.BGPSource
+		path string
+	}
+	var files []cached
+	var missing []string
+	for _, src := range list {
+		path := a.cache.Path(src.Filename)
+		if _, err := os.Stat(path); err == nil {
+			files = append(files, cached{src: src, path: path})
+			continue
+		}
+		missing = append(missing, src.Filename)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no cached BGP snapshots in %s; run `netblocks -y` first", a.opts.CacheDir)
+	}
+	if len(missing) > 0 {
+		if requireAll {
+			return fmt.Errorf("missing BGP snapshots: %s", strings.Join(missing, ", "))
+		}
+		a.warnf("missing BGP snapshots (skipping): %s", strings.Join(missing, ", "))
+	}
+
 	st, err := a.openStore(ctx)
 	if err != nil {
 		return err
 	}
-	var stats parse.Stats
-	var inserted int64
-	err = st.BulkASNAnnouncements(ctx, sources.SourceBGP, func(w *store.ASNWriter) error {
-		s, err := parse.BGP(ctx, bzip2.NewReader(fh), w.Insert)
-		if err != nil {
-			return err
+	type imported struct {
+		src      sources.BGPSource
+		stats    parse.Stats
+		inserted int64
+	}
+	var results []imported
+	names := make([]string, len(files))
+	for i, f := range files {
+		names[i] = f.src.Name
+	}
+	err = st.BulkASNAnnouncements(ctx, sources.SourceBGP, names, func(w *store.ASNWriter) error {
+		for _, f := range files {
+			before := w.Count
+			fh, err := os.Open(f.path)
+			if err != nil {
+				return err
+			}
+			var stats parse.Stats
+			switch f.src.Format {
+			case sources.BGPText:
+				stats, err = parse.BGP(ctx, bzip2.NewReader(fh), w.Insert)
+			case sources.BGPMRT:
+				stats, err = parse.MRT(ctx, bzip2.NewReader(fh), w.Insert)
+			default:
+				err = fmt.Errorf("unsupported BGP format %q", f.src.Format)
+			}
+			fh.Close()
+			if err != nil {
+				return fmt.Errorf("%s: %w", filepath.Base(f.path), err)
+			}
+			results = append(results, imported{src: f.src, stats: stats, inserted: w.Count - before})
 		}
-		stats = s
-		inserted = w.Count
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	_ = st.SetMeta(ctx, "last_asn_assignment_import", time.Now().UTC().Format(time.RFC3339))
-	a.printf("BGP announcement import complete: %d unique prefixes (%d paths, %d skipped)\n", inserted, stats.Records, stats.Skipped)
+	for _, r := range results {
+		a.printf("BGP import (%s) complete: %d unique prefixes (%d paths, %d skipped)\n", r.src.Name, r.inserted, r.stats.Records, r.stats.Skipped)
+	}
 	return nil
 }
 
@@ -762,6 +894,10 @@ func (a *App) exportGeoIP(ctx context.Context) error {
 	if asnFile == "" {
 		asnFile = "GeoIPASNum.csv"
 	}
+	asn6File := a.opts.GeoIPASNv6File
+	if asn6File == "" {
+		asn6File = "GeoIPASNumv6.csv"
+	}
 	if err := a.exportFile(v4, func(f *os.File) (export.Stats, error) {
 		return export.CountryCSV(ctx, st, f, netutil.IPv4, srcs, d)
 	}); err != nil {
@@ -774,6 +910,11 @@ func (a *App) exportGeoIP(ctx context.Context) error {
 	}
 	if err := a.exportFile(asnFile, func(f *os.File) (export.Stats, error) {
 		return export.ASNCSV(ctx, st, f, netutil.IPv4)
+	}); err != nil {
+		return err
+	}
+	if err := a.exportFile(asn6File, func(f *os.File) (export.Stats, error) {
+		return export.ASNCSV(ctx, st, f, netutil.IPv6)
 	}); err != nil {
 		return err
 	}

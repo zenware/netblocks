@@ -6,7 +6,66 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"time"
 )
+
+// BGP source names, used as the source_name column for BGP announcements.
+const (
+	BGPNameRouteViews  = "routeviews"
+	BGPNameRouteViews6 = "routeviews6"
+)
+
+// BGPFormat is the on-disk encoding of a BGP snapshot.
+type BGPFormat string
+
+const (
+	BGPText BGPFormat = "text"
+	BGPMRT  BGPFormat = "mrt"
+)
+
+// BGPSource describes one BGP RIB snapshot source.
+type BGPSource struct {
+	Name        string
+	Description string
+	URL         string // empty when the URL is time-dependent
+	Filename    string // stable cache filename
+	Format      BGPFormat
+}
+
+// BGPSources are the BGP snapshots netblocks can download and import.
+var BGPSources = []BGPSource{
+	{
+		Name:        BGPNameRouteViews,
+		Description: "RouteViews OIX full snapshot (IPv4 text)",
+		URL:         ASNAssignmentURL,
+		Filename:    "oix-full-snapshot-latest.dat.bz2",
+		Format:      BGPText,
+	},
+	{
+		Name:        BGPNameRouteViews6,
+		Description: "RouteViews route-views6 RIB (IPv6 MRT)",
+		Filename:    "route-views6-rib.bz2",
+		Format:      BGPMRT,
+	},
+}
+
+// BGPSourceByName returns the BGP source with the given name.
+func BGPSourceByName(name string) (BGPSource, bool) {
+	for _, src := range BGPSources {
+		if src.Name == name {
+			return src, true
+		}
+	}
+	return BGPSource{}, false
+}
+
+// RouteViews6RIBURL returns the RIB URL for the latest 2-hour slot at or
+// before t-2h, leaving time for the archive to publish.
+func RouteViews6RIBURL(t time.Time) string {
+	slot := t.UTC().Add(-2 * time.Hour).Truncate(2 * time.Hour)
+	return fmt.Sprintf("https://archive.routeviews.org/route-views6/bgpdata/%s/RIBS/rib.%s.bz2",
+		slot.Format("2006.01"), slot.Format("20060102.1504"))
+}
 
 // RIR describes a Regional Internet Registry delegation file.
 type RIR struct {
@@ -40,7 +99,8 @@ const (
 	// ASNDescriptionURL maps ASNs to organization names.
 	ASNDescriptionURL = "https://www.cidr-report.org/as2.0/autnums.html"
 
-	// ASNAssignmentURL is a full BGP RIB snapshot from RouteViews.
+	// ASNAssignmentURL is the RouteViews OIX full BGP RIB snapshot in text
+	// form. Despite its name it carries IPv4 announcements only.
 	ASNAssignmentURL = "https://archive.routeviews.org/oix-route-views/oix-full-snapshot-latest.dat.bz2"
 
 	// MaxMindGeoLite2URL is templated with a license key.

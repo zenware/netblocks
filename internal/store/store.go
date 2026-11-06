@@ -406,8 +406,12 @@ func (w *ASNWriter) Insert(a ASNAnnouncement) error {
 	return nil
 }
 
-// BulkASNAnnouncements atomically replaces all BGP announcements.
-func (s *Store) BulkASNAnnouncements(ctx context.Context, sourceType string, fn func(*ASNWriter) error) error {
+// BulkASNAnnouncements atomically replaces all BGP announcements for the
+// named source names.
+func (s *Store) BulkASNAnnouncements(ctx context.Context, sourceType string, sourceNames []string, fn func(*ASNWriter) error) error {
+	if len(sourceNames) == 0 {
+		return errors.New("no BGP source names provided")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -420,8 +424,10 @@ func (s *Store) BulkASNAnnouncements(ctx context.Context, sourceType string, fn 
 	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_asn_assignments_asn`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM asn_assignments WHERE source_type=?`, sourceType); err != nil {
-		return err
+	for _, name := range sourceNames {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM asn_assignments WHERE source_type=? AND source_name=?`, sourceType, name); err != nil {
+			return err
+		}
 	}
 	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO asn_assignments
 		(start_hex, next_start_hex, num_type, as_num, source_type, source_name)
@@ -436,7 +442,7 @@ func (s *Store) BulkASNAnnouncements(ctx context.Context, sourceType string, fn 
 	}
 	if w.Count == 0 {
 		_ = stmt.Close()
-		return fmt.Errorf("no %s announcements parsed; cache left unchanged", sourceType)
+		return fmt.Errorf("no %s announcements parsed from %s; cache left unchanged", sourceType, strings.Join(sourceNames, ","))
 	}
 	if err := stmt.Close(); err != nil {
 		return err
@@ -851,15 +857,26 @@ func (s *Store) Stats(ctx context.Context) ([]Stat, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	var bgp int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM asn_assignments`).Scan(&bgp); err != nil {
+	bgpRows, err := s.db.QueryContext(ctx, `SELECT num_type, COUNT(*) FROM asn_assignments GROUP BY num_type ORDER BY num_type`)
+	if err != nil {
+		return nil, err
+	}
+	defer bgpRows.Close()
+	for bgpRows.Next() {
+		var st Stat
+		if err := bgpRows.Scan(&st.NumType, &st.Count); err != nil {
+			return nil, err
+		}
+		st.SourceType = "bgp_snapshot"
+		out = append(out, st)
+	}
+	if err := bgpRows.Err(); err != nil {
 		return nil, err
 	}
 	var desc int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM asn_descriptions`).Scan(&desc); err != nil {
 		return nil, err
 	}
-	out = append(out, Stat{SourceType: "bgp_snapshot", NumType: "announcements", Count: bgp})
 	out = append(out, Stat{SourceType: "cidr_report", NumType: "descriptions", Count: desc})
 	return out, nil
 }

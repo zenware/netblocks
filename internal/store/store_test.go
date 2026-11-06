@@ -141,7 +141,7 @@ func TestStoreASNAndBGP(t *testing.T) {
 		t.Fatal(err)
 	}
 	start, end := ipRange(t, "8.8.8.0/24")
-	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", func(w *store.ASNWriter) error {
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews"}, func(w *store.ASNWriter) error {
 		if err := w.Insert(store.ASNAnnouncement{
 			Start: start, End: new(big.Int).Lsh(big.NewInt(1), 32), NumType: netutil.IPv4, ASN: 13335, SourceType: "bgp_snapshot", SourceName: "routeviews",
 		}); err == nil {
@@ -173,6 +173,59 @@ func TestStoreASNAndBGP(t *testing.T) {
 	desc, err := st.ASNDescription(ctx, 64500)
 	if err != nil || desc != "TEST-AS" {
 		t.Fatalf("description = %q, %v", desc, err)
+	}
+
+	v6Start, v6End := ipRange(t, "2001:db8::/32")
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews6"}, func(w *store.ASNWriter) error {
+		return w.Insert(store.ASNAnnouncement{
+			Start: v6Start, End: v6End, NumType: netutil.IPv6, ASN: 15169, SourceType: "bgp_snapshot", SourceName: "routeviews6",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6Addr, _, _ := netutil.ParseAddr("2001:db8::1")
+	orgs, err = st.OrgForIP(ctx, netutil.IPv6, v6Addr)
+	if err != nil || len(orgs) != 1 || orgs[0].ASN != 15169 {
+		t.Fatalf("ipv6 orgs = %+v, %v", orgs, err)
+	}
+
+	// Replacing the IPv4 source must leave the IPv6 source untouched.
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews"}, func(w *store.ASNWriter) error {
+		return w.Insert(store.ASNAnnouncement{
+			Start: start, End: end, NumType: netutil.IPv4, ASN: 13335, SourceType: "bgp_snapshot", SourceName: "routeviews",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orgs, err = st.OrgForIP(ctx, netutil.IPv4, addr)
+	if err != nil || len(orgs) != 1 || orgs[0].ASN != 13335 {
+		t.Fatalf("ipv4 orgs after reload = %+v, %v", orgs, err)
+	}
+	orgs, err = st.OrgForIP(ctx, netutil.IPv6, v6Addr)
+	if err != nil || len(orgs) != 1 || orgs[0].ASN != 15169 {
+		t.Fatalf("ipv6 orgs after ipv4 reload = %+v, %v", orgs, err)
+	}
+
+	stats, err := st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ipv4Stat, ipv6Stat bool
+	for _, s := range stats {
+		if s.SourceType != "bgp_snapshot" {
+			continue
+		}
+		switch s.NumType {
+		case "ipv4":
+			ipv4Stat = ipv4Stat || s.Count > 0
+		case "ipv6":
+			ipv6Stat = ipv6Stat || s.Count > 0
+		}
+	}
+	if !ipv4Stat || !ipv6Stat {
+		t.Fatalf("bgp stats = %+v", stats)
 	}
 }
 

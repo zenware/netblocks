@@ -72,17 +72,19 @@ func run(args []string) int {
 		geoV4       string
 		geoV6       string
 		geoASN      string
+		geoASNv6    string
 
 		listCC        bool
 		reservedCount bool
 		stats         bool
 
-		sourceFlag   string
-		merge        = true
-		noMerge      bool
-		expandASNs   = true
-		noExpandASNs bool
-		maxmindKey   string
+		sourceFlag    string
+		asnSourceFlag string
+		merge         = true
+		noMerge       bool
+		expandASNs    = true
+		noExpandASNs  bool
+		maxmindKey    string
 	)
 	fs.StringVar(&cacheDir, "c", cacheDir, "cache directory")
 	fs.StringVar(&cacheDir, "cache-dir", cacheDir, "cache directory (same as -c)")
@@ -151,12 +153,14 @@ func run(args []string) int {
 	fs.StringVar(&geoV4, "geoip-v4-file", "", "IPv4 GeoIP CSV output file")
 	fs.StringVar(&geoV6, "geoip-v6-file", "", "IPv6 GeoIP CSV output file")
 	fs.StringVar(&geoASN, "geoip-asn-file", "", "ASN GeoIP CSV output file")
+	fs.StringVar(&geoASNv6, "geoip-asn-v6-file", "", "IPv6 ASN GeoIP CSV output file")
 
 	fs.BoolVar(&listCC, "list-cc", false, "list known ISO country codes")
 	fs.BoolVar(&reservedCount, "reserved-count", false, "count reserved/available RIR records")
 	fs.BoolVar(&stats, "stats", false, "show cache row counts")
 
 	fs.StringVar(&sourceFlag, "source", "", "comma-separated sources: rir,lir,maxmind,all")
+	fs.StringVar(&asnSourceFlag, "asn-source", "", "comma-separated BGP sources: routeviews,routeviews6,all")
 	fs.BoolVar(&merge, "merge", true, "merge adjacent/overlapping blocks")
 	fs.BoolVar(&noMerge, "no-merge", false, "do not merge blocks")
 	fs.BoolVar(&expandASNs, "expand-asns", true, "expand multi-ASN allocations")
@@ -251,6 +255,7 @@ func run(args []string) int {
 		GeoIPV4File:    geoV4,
 		GeoIPV6File:    geoV6,
 		GeoIPASNFile:   geoASN,
+		GeoIPASNv6File: geoASNv6,
 		IP:             firstNonEmpty(ipv4, ipv6),
 		ASN:            asn,
 		Code:           firstNonEmpty(code, legacyCC),
@@ -286,6 +291,22 @@ func run(args []string) int {
 			return 2
 		}
 		opts.Sources = srcs
+	}
+	if asnSourceFlag != "" {
+		names, err := app.ParseBGPSources(asnSourceFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "netblocks: %v\n", err)
+			return 2
+		}
+		opts.BGPSources = names
+	}
+	if len(opts.BGPSources) > 0 {
+		switch opts.Mode {
+		case "init-asn-assignments", "reload-asn-assignments", "init-all":
+		default:
+			fmt.Fprintln(os.Stderr, "netblocks: --asn-source requires -y, -u, or --init")
+			return 2
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -362,6 +383,7 @@ Export:
       --geoip-v4-file FILE    IPv4 country CSV (default GeoIPCountryWhois.csv)
       --geoip-v6-file FILE    IPv6 country CSV (default v6.csv)
       --geoip-asn-file FILE   IPv4 ASN CSV (default GeoIPASNum.csv)
+      --geoip-asn-v6-file FILE IPv6 ASN CSV (default GeoIPASNumv6.csv)
 
 Options:
   -c, --cache-dir DIR         cache directory (default %s)
@@ -369,6 +391,7 @@ Options:
       --user-agent VALUE      User-Agent used when fetching
       --json                  machine-readable output for lookups
       --source LIST           rir,lir,maxmind (default is mode-specific)
+      --asn-source LIST       routeviews,routeviews6 (default routeviews)
       --offline               never download
       --retries N             download retry attempts (default 3)
       --timeout DURATION      overall timeout (for example 30m)
