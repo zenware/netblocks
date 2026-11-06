@@ -79,7 +79,7 @@ func TestStoreQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blocks, err := st.AssignmentsByCountry(ctx, netutil.IPv4, "MM", []string{"rir"})
+	blocks, err := st.AssignmentsByCountry(ctx, netutil.IPv4, "MM", []string{"rir"}, store.AssignmentFilter{})
 	if err != nil || len(blocks) != 1 {
 		t.Fatalf("blocks = %v, %v", blocks, err)
 	}
@@ -374,5 +374,175 @@ func TestAnnouncementsForASN(t *testing.T) {
 	none, err := st.AnnouncementsForASN(ctx, 64500, netutil.IPv4)
 	if err != nil || len(none) != 0 {
 		t.Fatalf("unknown ASN announcements = %+v, %v", none, err)
+	}
+}
+
+func TestEachComparison(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	insert := func(w *store.AssignmentWriter, cidr, cc, source string) error {
+		start, end := ipRange(t, cidr)
+		return w.Insert(store.Assignment{
+			Start: start, End: end, NumType: netutil.IPv4,
+			CountryCode: cc, SourceType: source, SourceName: "test",
+		})
+	}
+	if err := st.BulkAssignments(ctx, "rir", func(w *store.AssignmentWriter) error {
+		return insert(w, "203.81.64.0/19", "MM", "rir")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BulkAssignments(ctx, "lir", func(w *store.AssignmentWriter) error {
+		if err := insert(w, "203.81.64.0/19", "MM", "lir"); err != nil {
+			return err
+		}
+		return insert(w, "203.81.64.0/24", "IN", "lir")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	types := []netutil.NumType{netutil.IPv4}
+	want, err := st.Conflicts(ctx, "MM", types, []string{"rir"}, []string{"lir"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []store.Comparison
+	err = st.EachComparison(ctx, "MM", types, []string{"rir"}, []string{"lir"}, true, func(c store.Comparison) error {
+		got = append(got, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("streamed %d comparisons, want %d", len(got), len(want))
+	}
+	for i := range want {
+		x, y := got[i], want[i]
+		if x.First.Start.Cmp(y.First.Start) != 0 || x.First.End.Cmp(y.First.End) != 0 ||
+			x.First.SourceType != y.First.SourceType || x.First.CountryCode != y.First.CountryCode || x.First.NumType != y.First.NumType {
+			t.Fatalf("first %d = %+v, want %+v", i, x.First, y.First)
+		}
+		if x.Second.Start.Cmp(y.Second.Start) != 0 || x.Second.End.Cmp(y.Second.End) != 0 ||
+			x.Second.SourceType != y.Second.SourceType || x.Second.CountryCode != y.Second.CountryCode || x.Second.NumType != y.Second.NumType {
+			t.Fatalf("second %d = %+v, want %+v", i, x.Second, y.Second)
+		}
+	}
+
+	stop := errors.New("stop")
+	err = st.EachComparison(ctx, "MM", types, []string{"rir"}, []string{"lir"}, true, func(store.Comparison) error {
+		return stop
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("callback error = %v, want %v", err, stop)
+	}
+}
+
+func TestMaxMindASNStore(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	err = st.BulkMaxMindASN(ctx, func(w *store.MaxMindASNWriter) error {
+		v4Start, v4End := ipRange(t, "8.8.4.0/22")
+		if err := w.Insert(store.ASNAnnouncement{
+			Start: v4Start, End: v4End, NumType: netutil.IPv4, ASN: 15169,
+			SourceType: "maxmind", SourceName: "maxmind",
+		}); err != nil {
+			return err
+		}
+		v6Start, v6End := ipRange(t, "2001:db8::/32")
+		return w.Insert(store.ASNAnnouncement{
+			Start: v6Start, End: v6End, NumType: netutil.IPv6, ASN: 15169,
+			SourceType: "maxmind", SourceName: "maxmind",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.MaxMindASNCount(ctx, 15169); err != nil || n != 2 {
+		t.Fatalf("count = %d, %v", n, err)
+	}
+	v4, err := st.MaxMindASNForASN(ctx, 15169, netutil.IPv4)
+	if err != nil || len(v4) != 1 {
+		t.Fatalf("ipv4 = %+v, %v", v4, err)
+	}
+	if v4[0].ASN != 15169 || v4[0].NumType != netutil.IPv4 || v4[0].SourceType != "maxmind" || v4[0].SourceName != "maxmind" {
+		t.Fatalf("ipv4 announcement = %+v", v4[0])
+	}
+	start, _ := netutil.IntToAddr(v4[0].Start, 32)
+	end, _ := netutil.IntToAddr(v4[0].End, 32)
+	if start.String() != "8.8.4.0" || end.String() != "8.8.7.255" {
+		t.Fatalf("ipv4 range = %s-%s", start, end)
+	}
+	if none, err := st.MaxMindASNForASN(ctx, 64500, netutil.IPv4); err != nil || len(none) != 0 {
+		t.Fatalf("unknown ASN = %+v, %v", none, err)
+	}
+
+	err = st.BulkMaxMindASN(ctx, func(*store.MaxMindASNWriter) error { return nil })
+	if err == nil {
+		t.Fatal("empty import should fail")
+	}
+	if n, err := st.MaxMindASNCount(ctx, 15169); err != nil || n != 2 {
+		t.Fatalf("count after failed import = %d, %v", n, err)
+	}
+}
+
+func TestAssignmentFilter(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	err = st.BulkAssignments(ctx, "rir", func(w *store.AssignmentWriter) error {
+		insert := func(cidr, cc, status string) error {
+			start, end := ipRange(t, cidr)
+			return w.Insert(store.Assignment{
+				Start: start, End: end, NumType: netutil.IPv4,
+				CountryCode: cc, SourceType: "rir", SourceName: "test", Status: status,
+			})
+		}
+		if err := insert("10.0.0.0/8", "MM", "assigned"); err != nil {
+			return err
+		}
+		if err := insert("172.16.0.0/12", "MM", "reserved"); err != nil {
+			return err
+		}
+		return insert("192.0.2.0/24", "*", "reserved")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sources := []string{"rir"}
+	all, err := st.AssignmentsByCountry(ctx, netutil.IPv4, "MM", sources, store.AssignmentFilter{})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("unfiltered = %d, %v", len(all), err)
+	}
+	reserved, err := st.AssignmentsByCountry(ctx, netutil.IPv4, "MM", sources, store.AssignmentFilter{Statuses: []string{"reserved"}})
+	if err != nil || len(reserved) != 1 {
+		t.Fatalf("reserved = %d, %v", len(reserved), err)
+	}
+	start, _ := netutil.IntToAddr(reserved[0].Start, 32)
+	if start.String() != "172.16.0.0" {
+		t.Fatalf("reserved start = %s", start)
+	}
+	assigned, err := st.AssignmentsByCountry(ctx, netutil.IPv4, "MM", sources, store.AssignmentFilter{ExcludeReserved: true})
+	if err != nil || len(assigned) != 1 {
+		t.Fatalf("exclude reserved = %d, %v", len(assigned), err)
+	}
+	start, _ = netutil.IntToAddr(assigned[0].Start, 32)
+	if start.String() != "10.0.0.0" {
+		t.Fatalf("assigned start = %s", start)
 	}
 }

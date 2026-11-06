@@ -107,6 +107,10 @@ const (
 	MaxMindGeoLite2URL = "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=%s&suffix=zip"
 	MaxMindZipName     = "GeoLite2-Country-CSV.zip"
 
+	// MaxMindGeoLite2ASNURL is templated with a license key.
+	MaxMindGeoLite2ASNURL = "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN-CSV&license_key=%s&suffix=zip"
+	MaxMindASNZipName     = "GeoLite2-ASN-CSV.zip"
+
 	// CountryCodesFile is the cache filename for CountryCodesURL.
 	CountryCodesFile = "country-list.csv"
 )
@@ -114,6 +118,11 @@ const (
 // MaxMindURL returns the GeoLite2 download URL for a license key.
 func MaxMindURL(licenseKey string) string {
 	return fmt.Sprintf(MaxMindGeoLite2URL, url.QueryEscape(licenseKey))
+}
+
+// MaxMindASNURL returns the GeoLite2 ASN download URL for a license key.
+func MaxMindASNURL(licenseKey string) string {
+	return fmt.Sprintf(MaxMindGeoLite2ASNURL, url.QueryEscape(licenseKey))
 }
 
 // Filename returns the cache filename for a URL.

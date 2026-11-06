@@ -55,20 +55,26 @@ func run(args []string) int {
 		initAll         bool
 		legacyCC        string
 
-		ipv4           string
-		ipv6           string
-		asn            string
-		prefixes       bool
-		prefixLimit    int
-		code           string
-		name           string
-		compare        string
-		compareAll     bool
-		whatCC         string
-		lookupOrgIP    string
-		lookupOrgRange bool
-		rangeStart     string
-		rangeEnd       string
+		ipv4            string
+		ipv6            string
+		asn             string
+		prefixes        bool
+		prefixLimit     int
+		input           string
+		inputType       string
+		jsonl           bool
+		code            string
+		name            string
+		compare         string
+		compareAll      bool
+		compareLimit    int
+		statusFilter    string
+		excludeReserved bool
+		whatCC          string
+		lookupOrgIP     string
+		lookupOrgRange  bool
+		rangeStart      string
+		rangeEnd        string
 
 		exportGeoIP bool
 		geoV4       string
@@ -88,6 +94,7 @@ func run(args []string) int {
 		expandASNs    = true
 		noExpandASNs  bool
 		maxmindKey    string
+		maxmindASN    bool
 	)
 	fs.StringVar(&cacheDir, "c", cacheDir, "cache directory")
 	fs.StringVar(&cacheDir, "cache-dir", cacheDir, "cache directory (same as -c)")
@@ -140,6 +147,9 @@ func run(args []string) int {
 	fs.StringVar(&asn, "asn", "", "look up the country and description for an ASN")
 	fs.BoolVar(&prefixes, "prefixes", false, "list announced prefixes in ASN lookup")
 	fs.IntVar(&prefixLimit, "prefix-limit", 0, "maximum announced prefixes listed per address family (0 = all)")
+	fs.StringVar(&input, "input", "", "read lookup values from a file (- for stdin)")
+	fs.StringVar(&inputType, "input-type", "", "input value type for --input: ip, asn, or country")
+	fs.BoolVar(&jsonl, "jsonl", false, "emit one JSON object per input line (requires --input)")
 	fs.StringVar(&code, "t", "", "list allocations for CC[:ipv4|ipv6|asn]")
 	fs.StringVar(&code, "code", "", "list allocations for CC[:ipv4|ipv6|asn]")
 	fs.StringVar(&name, "n", "", "list allocations for a country name[:type]")
@@ -147,6 +157,9 @@ func run(args []string) int {
 	fs.StringVar(&compare, "p", "", "compare overlapping assignments for a country")
 	fs.StringVar(&compare, "compare", "", "compare overlapping assignments for a country")
 	fs.BoolVar(&compareAll, "compare-all", false, "show all overlapping assignments, not just country-code conflicts")
+	fs.IntVar(&compareLimit, "compare-limit", 0, "maximum conflict groups shown per first range (0 = all)")
+	fs.StringVar(&statusFilter, "status", "", "only include these statuses with -t/-n (comma-separated)")
+	fs.BoolVar(&excludeReserved, "exclude-reserved", false, "drop reserved/available records with -t/-n")
 	fs.StringVar(&whatCC, "w", "", "print the country name for a code")
 	fs.StringVar(&whatCC, "what-country", "", "print the country name for a code")
 	fs.StringVar(&lookupOrgIP, "lookup-org-by-ip", "", "look up ASN and description for an IP")
@@ -172,6 +185,7 @@ func run(args []string) int {
 	fs.BoolVar(&expandASNs, "expand-asns", true, "expand multi-ASN allocations")
 	fs.BoolVar(&noExpandASNs, "no-expand-asns", false, "only print the first ASN of each allocation")
 	fs.StringVar(&maxmindKey, "maxmind-license-key", "", "MaxMind license key (or MAXMIND_LICENSE_KEY)")
+	fs.BoolVar(&maxmindASN, "maxmind-asn", false, "use the GeoLite2-ASN edition with -m/-g/-r")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -233,6 +247,30 @@ func run(args []string) int {
 	add("what-country", set["w"] || set["what-country"] || whatCC != "")
 	add("lookup-org-by-ip", set["lookup-org-by-ip"] || lookupOrgIP != "")
 	add("lookup-org-by-range", lookupOrgRange)
+	add("batch", input != "")
+
+	if inputType != "" && input == "" {
+		fmt.Fprintln(os.Stderr, "netblocks: --input-type requires --input")
+		return 2
+	}
+	if input != "" && inputType == "" {
+		fmt.Fprintln(os.Stderr, "netblocks: --input requires --input-type ip|asn|country")
+		return 2
+	}
+	switch inputType {
+	case "", "ip", "asn", "country":
+	default:
+		fmt.Fprintf(os.Stderr, "netblocks: invalid --input-type %q (valid: ip, asn, country)\n", inputType)
+		return 2
+	}
+	if jsonl && jsonOut {
+		fmt.Fprintln(os.Stderr, "netblocks: --json and --jsonl are mutually exclusive")
+		return 2
+	}
+	if jsonl && input == "" {
+		fmt.Fprintln(os.Stderr, "netblocks: --jsonl requires --input")
+		return 2
+	}
 
 	if len(selected) > 1 {
 		fmt.Fprintf(os.Stderr, "netblocks: only one cache, lookup, or export mode is allowed (got %s)\n", strings.Join(selected, ", "))
@@ -252,13 +290,18 @@ func run(args []string) int {
 		Verbose:        verbose,
 		Quiet:          quiet,
 		JSON:           jsonOut,
+		Input:          input,
+		InputType:      inputType,
+		JSONL:          jsonl,
 		Offline:        offline,
 		Retries:        retries,
 		Merge:          merge && !noMerge,
 		ExpandASNs:     expandASNs && !noExpandASNs,
 		CompareAll:     compareAll,
+		CompareLimit:   compareLimit,
 		ImportMaxMind:  importMaxMind,
 		MaxMindLicense: maxmindKey,
+		MaxMindASN:     maxmindASN,
 		GeoIPV4File:    geoV4,
 		GeoIPV6File:    geoV6,
 		GeoIPASNFile:   geoASN,
@@ -281,6 +324,27 @@ func run(args []string) int {
 	}
 	if (prefixes || prefixLimit != 0) && opts.Mode != "asn" {
 		fmt.Fprintln(os.Stderr, "netblocks: --prefixes and --prefix-limit require -a/--asn")
+		return 2
+	}
+	if compareLimit < 0 {
+		fmt.Fprintln(os.Stderr, "netblocks: --compare-limit must be >= 0")
+		return 2
+	}
+	if compareLimit != 0 && opts.Mode != "compare" {
+		fmt.Fprintln(os.Stderr, "netblocks: --compare-limit requires -p/--compare")
+		return 2
+	}
+	if statusFilter != "" {
+		statuses, err := parseStatusList(statusFilter)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "netblocks: %v\n", err)
+			return 2
+		}
+		opts.Statuses = statuses
+	}
+	opts.ExcludeReserved = excludeReserved
+	if (statusFilter != "" || excludeReserved) && opts.Mode != "code" && opts.Mode != "name" {
+		fmt.Fprintln(os.Stderr, "netblocks: --status and --exclude-reserved require -t/--code or -n/--name")
 		return 2
 	}
 	if set["code"] || set["cc"] || set["t"] {
@@ -325,6 +389,10 @@ func run(args []string) int {
 			return 2
 		}
 	}
+	if maxmindASN && opts.Mode != "init-maxmind" && opts.Mode != "reload-maxmind" && opts.Mode != "import-maxmind" {
+		fmt.Fprintln(os.Stderr, "netblocks: --maxmind-asn requires -m, -g, or -r")
+		return 2
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -358,6 +426,18 @@ func splitSpec(s string) (value, filter string) {
 	return value, filter
 }
 
+func parseStatusList(s string) ([]string, error) {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		p := strings.ToLower(strings.TrimSpace(part))
+		if p == "" {
+			return nil, errors.New("empty status in --status list")
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 func usage(fs *flag.FlagSet) func() {
 	return func() {
 		fmt.Fprintf(fs.Output(), `netblocks %s - country netblock and ASN lookup
@@ -373,6 +453,7 @@ Cache modes:
   -m, --init-maxmind          download and import MaxMind GeoLite2 (license)
   -g, --reload-maxmind        import cached MaxMind data
   -r, --import-maxmind FILE   import a MaxMind zip/directory/CSV
+      --maxmind-asn           use the GeoLite2-ASN edition with -m/-g/-r
   -o, --download-cc           download the ISO country list
   -j, --init-asn-descriptions download and import ASN descriptions
   -k, --reload-asn-descriptions
@@ -389,8 +470,11 @@ Lookup modes:
       --prefix-limit N        max prefixes listed per family (0 = all)
   -t, --code CC[:type]        list allocations for a country
   -n, --name NAME[:type]      list allocations for a country name
+      --status LIST           only include statuses with -t/-n (allocated,assigned,...)
+      --exclude-reserved      drop reserved/available records with -t/-n
   -p, --compare CC            compare data sources (conflicts by default)
       --compare-all           show all overlaps, not just conflicts
+      --compare-limit N       max conflict groups per first range (0 = all)
   -w, --what-country CC       print the name for a country code
       --lookup-org-by-ip IP   look up ASN and description for an IP
       --lookup-org-by-range   look up announcements inside a range
@@ -409,6 +493,9 @@ Options:
   -v, --verbose               be verbose
       --user-agent VALUE      User-Agent used when fetching
       --json                  machine-readable output for lookups
+      --input FILE            read lookup values from FILE (- for stdin)
+      --input-type TYPE       input type for --input: ip, asn, or country
+      --jsonl                 one JSON object per input line
       --source LIST           rir,lir,maxmind (default is mode-specific)
       --asn-source LIST       routeviews,routeviews6 (default routeviews)
       --offline               never download

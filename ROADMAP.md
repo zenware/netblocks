@@ -138,42 +138,43 @@ future session can pick up an item without re-deriving the design.
 
 ## Medium priority
 
-### 5. Compare aggregation and streaming
+### 5. Compare aggregation and streaming — done
 
-- Default conflict mode can still print hundreds of rows for one RIR block
-  when a country has granular LIR assignments (e.g. `-p DE`).
-- Group conflicts per first range by `(second source, second country)`, with a
-  count and a few example ranges. Keep `--compare-all` for full detail.
-- Stream text comparisons instead of buffering all pairs; keep JSON collected.
-- Consider a `--compare-limit` for pathological cases.
+- Default conflict mode groups conflicts per first range by
+  `(second source, second country)` with a count and up to three example
+  ranges, so one RIR block no longer prints hundreds of rows.
+- Text comparisons stream from `Store.EachComparison` instead of buffering
+  every pair; `--compare-all` still prints one line per overlap.
+- `--compare-limit N` caps the conflict groups shown per first range.
+- `--json` comparison detail is unchanged: one object per pair.
 
-### 6. MaxMind ASN database
+### 6. MaxMind ASN database — done
 
-- Add GeoLite2-ASN CSV support as an alternative to the 49 MB BGP snapshot.
-- Blocks files contain `network,autonomous_system_number,
-  autonomous_system_organization`.
-- Decide whether to reuse `asn_assignments` with a new `source_name` or add a
-  dedicated table. If reused, ensure `-a` prefers BGP when both exist and
-  falls back to MaxMind.
-- Add `--maxmind-asn` and import the `GeoLite2-ASN-CSV` edition in the same
-  license flow as Country.
+- GeoLite2-ASN CSV import from a zip, a single blocks CSV, or a directory.
+  Organization names are ignored; ASN descriptions still come from cidr-report.
+- `--maxmind-asn` switches `-m`, `-g`, and `-r` to the ASN edition. The data
+  lives in its own `maxmind_asn_assignments` table so BGP and MaxMind prefixes
+  do not collide; the table is created additively without a schema bump.
+- `-a` prefers BGP announcements and falls back to MaxMind when the BGP
+  snapshot has no announcement for the ASN. `--stats` and `--info` report the
+  import and row counts.
 
-### 7. Bulk input and NDJSON
+### 7. Bulk input and NDJSON — done
 
-- Accept multiple IPs, CIDRs, ASNs, and country codes from a file or stdin.
-- Keep mode semantics explicit: `--ipv4 @file` or a new `--input --type ip`.
-- Add `--jsonl`/NDJSON for one result object per line.
-- Ensure partial failures return a non-zero exit code but do not discard
-  successful results.
+- `--input FILE` (or `-` for stdin) with `--input-type ip|asn|country` runs
+  one lookup per line, skipping blank lines and `#` comments.
+- `--json` emits one array of result objects; `--jsonl` emits one object per
+  line.
+- Per-line failures are reported on stderr and the process exits non-zero
+  after every successful result has been written.
 
-### 8. RIR status and special-use filtering
+### 8. RIR status and special-use filtering — done
 
-- `assignments.status` and `country_code='*'` are already stored.
-- Add status filters (`--status allocated,assigned`) and
-  `--exclude-reserved` to country listings.
-- Consider integrating the IANA special-purpose registry so private,
-  loopback, multicast, and documentation ranges can be excluded from
-  country results.
+- `--status allocated,assigned` filters `-t`/`-n` output by RIR status.
+- `--exclude-reserved` drops `country_code` `''`/`*` and
+  `reserved`/`available` statuses.
+- The IANA special-purpose registry is not integrated; filtering uses the
+  stored status/country columns, the same predicate as `--reserved-count`.
 
 ## Low priority
 
@@ -193,16 +194,18 @@ future session can pick up an item without re-deriving the design.
 - MaxMind's licensed download path is covered by synthetic GeoLite2 zips, not
   a live licensed fetch.
 - The default RouteViews snapshot contains no IPv6 announcements.
-- `--compare-all` buffers all comparisons in memory; conflict mode is the
-  default for that reason.
+- Text comparisons stream in store order and are bounded by `--compare-limit`;
+  `--json` still collects every pair for the `comparisons` array.
+- MaxMind ASN data is consulted only by `-a` when BGP has no announcement for
+  the ASN. Org lookups and ASN exports remain BGP-only.
+- `--exclude-reserved` uses stored status and country columns; the IANA
+  special-purpose registry is not integrated.
 - LIR data is RIPE-only, as in blockfinder.
 - `--source` in compare mode selects the baseline; the second side is every
   other assignment source.
 
 ## Suggested order
 
-1. CI (cheap, protects everything after it).
-2. `--info` (small and immediately useful).
-3. ASN prefixes (small, high user value).
-4. IPv6 BGP + IPv6 ASN export (largest functional gap).
-5. MaxMind ASN and bulk input (workflow improvements).
+High and medium priority items are complete. What remains is the low-priority
+list: packaging, checksum hardening, ASN search, output formats, and schema
+migrations.

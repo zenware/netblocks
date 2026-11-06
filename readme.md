@@ -8,12 +8,13 @@ lookup modes, plus a few things the original could not do:
 - downloads all five RIR delegation files (ARIN, RIPE NCC, AFRINIC, APNIC,
   LACNIC) over HTTPS, verifies each `.md5` checksum when published, and
   understands ARIN's extended status/opaque-id columns;
-- imports RIPE LIR `inetnum`/`inet6num` data, MaxMind GeoLite2 CSV, and
-  RouteViews BGP snapshots;
+- imports RIPE LIR `inetnum`/`inet6num` data, MaxMind GeoLite2 Country and ASN
+  CSV, and RouteViews BGP snapshots;
 - verifies RIR downloads against each registry's `.md5` checksum;
 - uses a single pure-Go binary with SQLite built in — no Python, no CGO;
 - works offline after the first import;
-- emits JSON for every lookup;
+- emits JSON for every lookup, plus NDJSON for batch runs;
+- runs batch lookups from a file or stdin (`--input`/`--input-type`);
 - merges adjacent/overlapping blocks by default (`--no-merge` reproduces the
   original per-record output);
 - expands multi-ASN allocations by default (`--no-expand-asns` reproduces the
@@ -53,6 +54,13 @@ works and cross-compilation is straightforward.
 # Compare overlapping assignments across data sources
 ./netblocks -p MM
 
+# Only assigned IPv4 allocations
+./netblocks -t MM:ipv4 --status assigned
+
+# Batch lookups, one value per line
+./netblocks --input ips.txt --input-type ip
+./netblocks --input ips.txt --input-type ip --jsonl
+
 # Machine-readable output
 ./netblocks --json -4 8.8.8.8
 ```
@@ -89,6 +97,9 @@ Notes:
 - MaxMind GeoLite2 requires a free license key. Set
   `MAXMIND_LICENSE_KEY` or pass `--maxmind-license-key`. Alternatively,
   download the CSV zip yourself and use `-r`.
+- `--maxmind-asn` switches `-m`, `-g`, and `-r` to the GeoLite2-ASN edition
+  instead of the Country edition. ASN data is kept separately from BGP
+  announcements and is used by `-a` only when BGP has nothing for that ASN.
 - `--offline` makes every download fail if the file is not already cached,
   which is useful for reproducible queries and air-gapped systems.
 - Downloads are atomic (temporary file + rename) and retried on transient
@@ -129,20 +140,48 @@ pipelines:
 ./netblocks -t MM:asn
 ```
 
+`--status` keeps only the named RIR statuses and `--exclude-reserved` drops
+`reserved`/`available` records and records with no country code (`''` or
+`*`). Both apply to `-t` and `-n` only:
+
+```sh
+./netblocks -t MM:ipv4 --status assigned
+./netblocks -t MM:ipv4 --exclude-reserved
+```
+
+`--input FILE --input-type ip|asn|country` runs one lookup per line (`-` reads
+stdin). Blank lines and lines starting with `#` are ignored, per-line failures
+are reported on stderr, and the process exits non-zero after writing every
+successful result. Use `--json` for one array or `--jsonl` for one object per
+line:
+
+```sh
+./netblocks --input ips.txt --input-type ip
+./netblocks --input ips.txt --input-type ip --json
+./netblocks --input ips.txt --input-type ip --jsonl
+```
+
 Reverse lookups consult whatever sources are cached. Use
 `--source rir,lir,maxmind` to restrict them.
 
 `-p CC` uses RIR assignments as the baseline and compares them with LIR and
-MaxMind assignments. It reports country-code conflicts only, which keeps the
-output useful even when a country has hundreds of thousands of LIR customer
-assignments. Use `--compare-all` to print every overlap (same-country results
-included), and `--source` to choose the baseline sources:
+MaxMind assignments. It reports country-code conflicts only, grouped per
+baseline range by second source and country, with a count and up to three
+example ranges, which keeps the output useful even when a country has
+hundreds of thousands of LIR customer assignments. `--compare-limit N` caps
+the groups shown per baseline range. Use `--compare-all` to print every
+overlap (same-country results included), and `--source` to choose the baseline
+sources:
 
 ```sh
 ./netblocks -p IT
+./netblocks -p IT --compare-limit 5
 ./netblocks -p IT --compare-all
 ./netblocks -p IT --source lir --compare-all
 ```
+
+`--json -p` always contains one object per overlapping pair, unaffected by
+grouping or `--compare-limit`.
 
 ### Merging and ASN expansion
 
@@ -170,7 +209,8 @@ blockfinder.
 ## JSON output
 
 `--json` applies to lookup, compare, stats, info, country-list, and
-reserved-count modes. Example:
+reserved-count modes. `--jsonl` applies to batch runs and writes one JSON
+object per input line. Example:
 
 ```sh
 $ ./netblocks --json -t MM
@@ -219,9 +259,15 @@ MaxMind format. Empty datasets produce a warning and no file.
 -v, --verbose                print download and parse progress
     --user-agent VALUE       User-Agent used when fetching
     --json                   machine-readable output
+    --jsonl                  one JSON object per --input line
+    --input FILE             batch lookup values, one per line (- = stdin)
+    --input-type TYPE        batch input type: ip, asn, or country
     --source LIST            rir,lir,maxmind (or all)
     --asn-source LIST        routeviews,routeviews6 (or all; default routeviews)
+    --status LIST            keep these RIR statuses with -t/-n
+    --exclude-reserved       drop reserved/available records with -t/-n
     --compare-all            show all overlaps in -p, not just conflicts
+    --compare-limit N        max conflict groups per baseline range in -p
     --offline                never download
     --retries N              download retry attempts (default 3)
     --timeout DURATION       overall timeout (default none)
@@ -256,7 +302,7 @@ usually means `-d` is due. `--json --info` emits the same data as one object
 | ASN names | `https://www.cidr-report.org/as2.0/autnums.html` |
 | BGP RIB | `https://archive.routeviews.org/oix-route-views/oix-full-snapshot-latest.dat.bz2` (IPv4 text), `https://archive.routeviews.org/route-views6/bgpdata/YYYY.MM/RIBS/rib.YYYYMMDD.HHMM.bz2` (IPv6 MRT) |
 | Country list | `https://raw.githubusercontent.com/datasets/country-list/master/data.csv` |
-| MaxMind | `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=...` |
+| MaxMind | `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=...` (and `GeoLite2-ASN-CSV` with `--maxmind-asn`) |
 
 RIR downloads are verified against the corresponding `.md5` file when the
 registry publishes one. The country list is embedded in the binary, so
@@ -290,10 +336,11 @@ Differences:
 
 ## How it works
 
-The cache is a SQLite database with three tables:
+The cache is a SQLite database with four tables:
 
 - `assignments` — country assignments from RIR, LIR, and MaxMind data.
 - `asn_assignments` — BGP prefix-to-origin-ASN announcements.
+- `maxmind_asn_assignments` — MaxMind GeoLite2-ASN prefix-to-origin-ASN rows.
 - `asn_descriptions` — ASN-to-organization names.
 
 Ranges are stored as fixed-width hexadecimal keys, `[start_hex,

@@ -590,3 +590,374 @@ func TestCacheInfo(t *testing.T) {
 		t.Fatalf("fresh files not encoded as []: %s", raw)
 	}
 }
+
+func TestCompareGrouping(t *testing.T) {
+	dir := setupCache(t)
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(dir, "netblocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct{ cidr, cc string }{
+		{"203.81.64.0/24", "IN"},
+		{"203.81.65.0/24", "IN"},
+		{"203.81.66.0/24", "IN"},
+		{"203.81.67.0/24", "DE"},
+		{"203.81.68.0/24", "FR"},
+	}
+	err = st.BulkAssignments(ctx, "lir", func(w *store.AssignmentWriter) error {
+		for _, row := range rows {
+			start, end, _, err := netutil.ParsePrefix(row.cidr)
+			if err != nil {
+				return err
+			}
+			if err := w.Insert(store.Assignment{
+				Start: start, End: end, NumType: netutil.IPv4,
+				CountryCode: row.cc, SourceType: "lir", SourceName: "test", Status: "assigned",
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	out, _, err := runApp(t, dir, app.Options{Mode: "compare", Compare: "MM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "* IN lir: 3 ranges (203.81.64.0/24, 203.81.65.0/24, 203.81.66.0/24)") {
+		t.Fatalf("grouped conflict output missing IN group:\n%s", out)
+	}
+	if strings.Contains(out, "* IN 203.81.64.0/24 lir") {
+		t.Fatalf("conflict output still prints per-pair lines:\n%s", out)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "compare", Compare: "MM", CompareLimit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "* DE lir: 1 ranges (203.81.67.0/24)") {
+		t.Fatalf("limited output missing first group:\n%s", out)
+	}
+	if !strings.Contains(out, "... 2 more conflict groups") {
+		t.Fatalf("limited output missing suppressed count:\n%s", out)
+	}
+	if strings.Contains(out, "* IN lir:") {
+		t.Fatalf("limited output still prints suppressed groups:\n%s", out)
+	}
+
+	raw, _, err := runApp(t, dir, app.Options{Mode: "compare", Compare: "MM", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Comparisons []json.RawMessage `json:"comparisons"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if len(decoded.Comparisons) != 5 {
+		t.Fatalf("comparisons = %d, want 5", len(decoded.Comparisons))
+	}
+}
+
+func TestMaxMindASNFallback(t *testing.T) {
+	dir := setupCache(t)
+	asnDir := t.TempDir()
+	header := "network,autonomous_system_number,autonomous_system_organization\n"
+	if err := os.WriteFile(filepath.Join(asnDir, "GeoLite2-ASN-Blocks-IPv4.csv"),
+		[]byte(header+"8.8.4.0/22,15169,Google LLC\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(asnDir, "GeoLite2-ASN-Blocks-IPv6.csv"),
+		[]byte(header+"2001:db8::/32,15169,Google LLC\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runApp(t, dir, app.Options{Mode: "import-maxmind", ImportMaxMind: asnDir, MaxMindASN: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "MaxMind ASN import complete: 2 records") {
+		t.Fatalf("import output = %q", out)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "asn", ASN: "15169", Prefixes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"AS announced prefixes: 2", "IPv4 prefixes:", "8.8.4.0/22", "IPv6 prefixes:", "2001:db8::/32"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("asn text missing %q:\n%s", want, out)
+		}
+	}
+
+	type asnJSON struct {
+		AnnouncedPrefixes int64 `json:"announced_prefixes"`
+		Announcements     []struct {
+			Network    string `json:"network"`
+			Source     string `json:"source"`
+			SourceType string `json:"source_type"`
+		} `json:"announcements"`
+	}
+	raw, _, err := runApp(t, dir, app.Options{Mode: "asn", ASN: "15169", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded asnJSON
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if decoded.AnnouncedPrefixes != 2 || len(decoded.Announcements) != 2 {
+		t.Fatalf("maxmind announcements = %+v", decoded)
+	}
+	for _, ann := range decoded.Announcements {
+		if ann.Source != "maxmind" || ann.SourceType != "maxmind" {
+			t.Fatalf("announcement source = %+v", ann)
+		}
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(dir, "netblocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end, _, err := netutil.ParsePrefix("8.8.8.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews"}, func(w *store.ASNWriter) error {
+		return w.Insert(store.ASNAnnouncement{
+			Start: start, End: end, NumType: netutil.IPv4, ASN: 15169,
+			SourceType: "bgp_snapshot", SourceName: "routeviews",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "asn", ASN: "15169", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded = asnJSON{}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if decoded.AnnouncedPrefixes != 1 || len(decoded.Announcements) != 1 {
+		t.Fatalf("bgp announcements = %+v", decoded)
+	}
+	if decoded.Announcements[0].Network != "8.8.8.0/24" || decoded.Announcements[0].Source != "routeviews" {
+		t.Fatalf("bgp announcement = %+v", decoded.Announcements[0])
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "stats"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "maxmind") {
+		t.Fatalf("stats missing maxmind row:\n%s", out)
+	}
+	out, _, err = runApp(t, dir, app.Options{Mode: "info"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "last_maxmind_asn_import") {
+		t.Fatalf("info missing ASN import key:\n%s", out)
+	}
+}
+
+func TestBatch(t *testing.T) {
+	dir := setupCache(t)
+	ipsPath := filepath.Join(dir, "ips.txt")
+	if err := os.WriteFile(ipsPath, []byte("203.81.64.1\n2001:200::1\nnot-an-ip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errOut, err := runApp(t, dir, app.Options{Mode: "batch", Input: ipsPath, InputType: "ip"})
+	if err == nil || err.Error() != "1 of 3 inputs failed" {
+		t.Fatalf("batch error = %v", err)
+	}
+	for _, want := range []string{"> 203.81.64.1", "MM", "> 2001:200::1", "JP"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("text batch missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(errOut, "not-an-ip") {
+		t.Fatalf("stderr missing failed line: %q", errOut)
+	}
+
+	raw, _, err := runApp(t, dir, app.Options{Mode: "batch", Input: ipsPath, InputType: "ip", JSON: true})
+	if err == nil || err.Error() != "1 of 3 inputs failed" {
+		t.Fatalf("json batch error = %v", err)
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("json batch items = %d, want 2", len(items))
+	}
+	var first struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(items[0], &first); err != nil || first.Query != "ip" {
+		t.Fatalf("first item = %+v, %v", first, err)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "batch", Input: ipsPath, InputType: "ip", JSONL: true})
+	if err == nil || err.Error() != "1 of 3 inputs failed" {
+		t.Fatalf("jsonl batch error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("jsonl lines = %d, want 2:\n%s", len(lines), raw)
+	}
+	for i, line := range lines {
+		var obj struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal([]byte(line), &obj); err != nil || obj.Query != "ip" {
+			t.Fatalf("jsonl line %d = %q, %v", i, line, err)
+		}
+	}
+
+	countriesPath := filepath.Join(dir, "countries.txt")
+	if err := os.WriteFile(countriesPath, []byte("MM:ipv4\nJP:ipv6\nZZ\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = runApp(t, dir, app.Options{Mode: "batch", Input: countriesPath, InputType: "country"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"> MM:ipv4", "> JP:ipv6", "> ZZ"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("country batch missing %q:\n%s", want, out)
+		}
+	}
+	raw, _, err = runApp(t, dir, app.Options{Mode: "batch", Input: countriesPath, InputType: "country", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items = nil
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("country json items = %d, want 3", len(items))
+	}
+
+	asnsPath := filepath.Join(dir, "asns.txt")
+	if err := os.WriteFile(asnsPath, []byte("AS173\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err = runApp(t, dir, app.Options{Mode: "batch", Input: asnsPath, InputType: "asn", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asnItems []struct {
+		Query string `json:"query"`
+		ASN   uint32 `json:"asn"`
+	}
+	if err := json.Unmarshal([]byte(raw), &asnItems); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if len(asnItems) != 1 || asnItems[0].Query != "asn" || asnItems[0].ASN != 173 {
+		t.Fatalf("asn batch = %+v", asnItems)
+	}
+
+	emptyPath := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = runApp(t, dir, app.Options{Mode: "batch", Input: emptyPath, InputType: "ip", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "[]\n" {
+		t.Fatalf("empty json batch = %q", out)
+	}
+}
+
+func TestCountryFilters(t *testing.T) {
+	dir := setupCache(t)
+
+	out, _, err := runApp(t, dir, app.Options{Mode: "code", Code: "JP", Statuses: []string{"assigned"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "" {
+		t.Fatalf("JP assigned output = %q, want empty", out)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "code", Code: "JP", TypeFilter: "ipv6", Statuses: []string{"allocated"}, Merge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "2001:200::/32") {
+		t.Fatalf("JP allocated output = %q", out)
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(dir, "netblocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct{ cidr, cc, status string }{
+		{"203.81.64.0/24", "MM", "reserved"},
+		{"203.81.65.0/24", "MM", "assigned"},
+	}
+	err = st.BulkAssignments(ctx, "lir", func(w *store.AssignmentWriter) error {
+		for _, row := range rows {
+			start, end, _, err := netutil.ParsePrefix(row.cidr)
+			if err != nil {
+				return err
+			}
+			if err := w.Insert(store.Assignment{
+				Start: start, End: end, NumType: netutil.IPv4,
+				CountryCode: row.cc, SourceType: "lir", SourceName: "test", Status: row.status,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	base := app.Options{Mode: "code", Code: "MM", TypeFilter: "ipv4", Sources: []string{"lir"}, Merge: true}
+	out, _, err = runApp(t, dir, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "203.81.64.0/23\n" {
+		t.Fatalf("unfiltered MM lir = %q", out)
+	}
+
+	excluded := base
+	excluded.ExcludeReserved = true
+	out, _, err = runApp(t, dir, excluded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "203.81.65.0/24\n" {
+		t.Fatalf("exclude-reserved MM lir = %q", out)
+	}
+
+	onlyReserved := base
+	onlyReserved.Statuses = []string{"reserved"}
+	out, _, err = runApp(t, dir, onlyReserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "203.81.64.0/24\n" {
+		t.Fatalf("status reserved MM lir = %q", out)
+	}
+}

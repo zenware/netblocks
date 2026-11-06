@@ -33,6 +33,10 @@ type Options struct {
 	Out io.Writer
 	Err io.Writer
 
+	Input     string
+	InputType string
+	JSONL     bool
+
 	UserAgent string
 	Verbose   bool
 	Quiet     bool
@@ -40,12 +44,15 @@ type Options struct {
 	Offline   bool
 	Retries   int
 
-	Sources    []string
-	BGPSources []string
-	Merge      bool
-	ExpandASNs bool
-	CompareAll bool
-	TypeFilter string
+	Sources         []string
+	BGPSources      []string
+	Merge           bool
+	ExpandASNs      bool
+	CompareAll      bool
+	CompareLimit    int
+	TypeFilter      string
+	Statuses        []string
+	ExcludeReserved bool
 
 	IP             string
 	ASN            string
@@ -60,6 +67,7 @@ type Options struct {
 	RangeEnd       string
 	ImportMaxMind  string
 	MaxMindLicense string
+	MaxMindASN     bool
 
 	GeoIPV4File    string
 	GeoIPV6File    string
@@ -73,6 +81,8 @@ type App struct {
 	cache   *cache.Client
 	country *countries.Data
 	st      *store.Store
+
+	warnedLookupState bool
 }
 
 // DefaultCacheDir returns $NETBLOCKS_CACHE or ~/.netblocks.
@@ -174,6 +184,8 @@ func Run(ctx context.Context, opts Options) error {
 		return a.lookupASN(ctx)
 	case "compare":
 		return a.compare(ctx)
+	case "batch":
+		return a.batch(ctx)
 	case "what-country":
 		return a.whatCountry(ctx)
 	case "lookup-org-by-ip":
@@ -399,6 +411,10 @@ func (a *App) warnLookupState(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	if a.warnedLookupState {
+		return
+	}
+	a.warnedLookupState = true
 	if n, err := st.CountAssignments(ctx); err == nil && n == 0 {
 		a.warnf("cache has no assignment data; run `netblocks -i` first")
 		return
@@ -711,11 +727,19 @@ func (a *App) importASNAssignments(ctx context.Context, requireAll bool) error {
 	return nil
 }
 
-func (a *App) initMaxMind(ctx context.Context) error {
+func (a *App) maxMindLicense() string {
 	license := a.opts.MaxMindLicense
 	if license == "" {
 		license = os.Getenv("MAXMIND_LICENSE_KEY")
 	}
+	return license
+}
+
+func (a *App) initMaxMind(ctx context.Context) error {
+	if a.opts.MaxMindASN {
+		return a.initMaxMindASN(ctx)
+	}
+	license := a.maxMindLicense()
 	if license == "" {
 		return errors.New("MaxMind GeoLite2 requires a license key; set MAXMIND_LICENSE_KEY, pass --maxmind-license-key, or import a downloaded file with -r FILE")
 	}
@@ -727,7 +751,27 @@ func (a *App) initMaxMind(ctx context.Context) error {
 	return a.importMaxMindPaths(ctx, []string{path})
 }
 
+func (a *App) initMaxMindASN(ctx context.Context) error {
+	license := a.maxMindLicense()
+	if license == "" {
+		return errors.New("MaxMind GeoLite2 ASN requires a license key; set MAXMIND_LICENSE_KEY, pass --maxmind-license-key, or import a downloaded file with -r FILE --maxmind-asn")
+	}
+	a.printf("Downloading MaxMind GeoLite2 ASN CSV...\n")
+	path, err := a.cache.DownloadTo(ctx, sources.MaxMindASNURL(license), sources.MaxMindASNZipName)
+	if err != nil {
+		return err
+	}
+	return a.importMaxMindASNPaths(ctx, []string{path})
+}
+
 func (a *App) reloadMaxMind(ctx context.Context) error {
+	if a.opts.MaxMindASN {
+		path := a.cache.Path(sources.MaxMindASNZipName)
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("no cached MaxMind ASN data in %s; run `netblocks -m --maxmind-asn` (license required) or `-r FILE --maxmind-asn`", a.opts.CacheDir)
+		}
+		return a.importMaxMindASNPaths(ctx, []string{path})
+	}
 	geoPath := a.cache.Path(sources.MaxMindZipName)
 	if _, err := os.Stat(geoPath); err == nil {
 		return a.importMaxMindPaths(ctx, []string{geoPath})
@@ -752,7 +796,36 @@ func (a *App) importMaxMind(ctx context.Context, path string) error {
 	if path == "" {
 		return errors.New("--import-maxmind requires a file or directory")
 	}
+	if a.opts.MaxMindASN {
+		return a.importMaxMindASNPaths(ctx, []string{path})
+	}
 	return a.importMaxMindPaths(ctx, []string{path})
+}
+
+func (a *App) importMaxMindASNPaths(ctx context.Context, paths []string) error {
+	st, err := a.openStore(ctx)
+	if err != nil {
+		return err
+	}
+	var total parse.Stats
+	err = st.BulkMaxMindASN(ctx, func(w *store.MaxMindASNWriter) error {
+		for _, path := range paths {
+			stats, err := parse.MaxMindASN(ctx, path, w.Insert)
+			if err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			a.logf("parsed %s: %d records, %d skipped", path, stats.Records, stats.Skipped)
+			total.Records += stats.Records
+			total.Skipped += stats.Skipped
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	_ = st.SetMeta(ctx, "last_maxmind_asn_import", time.Now().UTC().Format(time.RFC3339))
+	a.printf("MaxMind ASN import complete: %d records (%d skipped)\n", total.Records, total.Skipped)
+	return nil
 }
 
 func (a *App) importMaxMindPaths(ctx context.Context, paths []string) error {
@@ -793,8 +866,11 @@ func (a *App) initAll(ctx context.Context) error {
 		{"ASN descriptions", a.initASNDescriptions},
 		{"BGP announcements", a.initASNAssignments},
 	}
-	if a.opts.MaxMindLicense != "" || os.Getenv("MAXMIND_LICENSE_KEY") != "" {
-		steps = append(steps, step{"MaxMind GeoLite2", a.initMaxMind})
+	if a.maxMindLicense() != "" {
+		steps = append(steps,
+			step{"MaxMind GeoLite2", a.initMaxMind},
+			step{"MaxMind ASN", a.initMaxMindASN},
+		)
 	}
 	var errs []error
 	for i, step := range steps {
@@ -816,6 +892,7 @@ var cacheImportKeys = []string{
 	"last_asn_description_import",
 	"last_asn_assignment_import",
 	"last_maxmind_import",
+	"last_maxmind_asn_import",
 }
 
 type cacheFileInfo struct {

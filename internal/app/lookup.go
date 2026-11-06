@@ -116,7 +116,10 @@ func (a *App) lookupCountry(ctx context.Context, code string) error {
 	var textParts []string
 	found := false
 	for _, numType := range types {
-		list, err := st.AssignmentsByCountry(ctx, numType, code, srcs)
+		list, err := st.AssignmentsByCountry(ctx, numType, code, srcs, store.AssignmentFilter{
+			Statuses:        a.opts.Statuses,
+			ExcludeReserved: a.opts.ExcludeReserved,
+		})
 		if err != nil {
 			return err
 		}
@@ -301,6 +304,19 @@ func (a *App) lookupASN(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// BGP announcements win; MaxMind ASN data fills in when the BGP snapshot
+	// has no announcements for this ASN.
+	useMaxMind := false
+	if count == 0 {
+		mm, err := st.MaxMindASNCount(ctx, asn)
+		if err != nil {
+			return err
+		}
+		if mm > 0 {
+			count = mm
+			useMaxMind = true
+		}
+	}
 	result := asnDetail{ASN: asn, Description: description, Prefixes: count}
 	if found {
 		result.CountryCode = assigned.CountryCode
@@ -312,7 +328,12 @@ func (a *App) lookupASN(ctx context.Context) error {
 	if a.opts.Prefixes || a.opts.JSON {
 		announcements = make([]asnAnnouncement, 0)
 		for _, numType := range []netutil.NumType{netutil.IPv4, netutil.IPv6} {
-			list, err := st.AnnouncementsForASN(ctx, asn, numType)
+			var list []store.ASNAnnouncement
+			if useMaxMind {
+				list, err = st.MaxMindASNForASN(ctx, asn, numType)
+			} else {
+				list, err = st.AnnouncementsForASN(ctx, asn, numType)
+			}
 			if err != nil {
 				return err
 			}

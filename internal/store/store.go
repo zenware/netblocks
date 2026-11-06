@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/zenware/netblocks/internal/netutil"
+	"github.com/zenware/netblocks/internal/sources"
 )
 
 // SchemaVersion is bumped whenever the on-disk schema changes.
@@ -52,6 +53,12 @@ type Assignment struct {
 	Status      string
 	StartDate   string
 	OpaqueID    string
+}
+
+// AssignmentFilter narrows country assignment queries.
+type AssignmentFilter struct {
+	Statuses        []string
+	ExcludeReserved bool
 }
 
 // ASNAnnouncement is one BGP prefix announcement.
@@ -140,6 +147,18 @@ func dsn(path string) string {
 	return u.String()
 }
 
+// maxMindASNTableDDL creates the additive MaxMind ASN table. It is created
+// for new caches and for existing schema-2 caches, which gain it on open
+// without a schema version bump.
+const maxMindASNTableDDL = `CREATE TABLE IF NOT EXISTS maxmind_asn_assignments (
+	id INTEGER PRIMARY KEY,
+	start_hex TEXT NOT NULL,
+	next_start_hex TEXT NOT NULL,
+	num_type TEXT NOT NULL,
+	as_num INTEGER NOT NULL,
+	UNIQUE(num_type, start_hex, next_start_hex)
+)`
+
 func (s *Store) initSchema() error {
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
 		return err
@@ -157,6 +176,9 @@ func (s *Store) initSchema() error {
 		return err
 	case version != SchemaVersion:
 		return &SchemaError{Have: version, Want: SchemaVersion}
+	}
+	if _, err := s.db.Exec(maxMindASNTableDDL); err != nil {
+		return err
 	}
 	return s.ensureIndexes()
 }
@@ -185,6 +207,7 @@ func (s *Store) createSchema() error {
 			source_name TEXT NOT NULL DEFAULT '',
 			UNIQUE(num_type, start_hex, next_start_hex)
 		)`,
+		maxMindASNTableDDL,
 		`CREATE TABLE IF NOT EXISTS asn_descriptions (
 			as_num INTEGER NOT NULL,
 			source_name TEXT NOT NULL,
@@ -221,8 +244,17 @@ var asnIndexes = []struct{ name, sql string }{
 	{"idx_asn_descriptions_asn", `CREATE INDEX IF NOT EXISTS idx_asn_descriptions_asn ON asn_descriptions(as_num)`},
 }
 
+var maxMindASNIndexes = []struct{ name, sql string }{
+	{"idx_maxmind_asn_lookup", `CREATE INDEX IF NOT EXISTS idx_maxmind_asn_lookup ON maxmind_asn_assignments(num_type, start_hex)`},
+	{"idx_maxmind_asn_asn", `CREATE INDEX IF NOT EXISTS idx_maxmind_asn_asn ON maxmind_asn_assignments(as_num)`},
+}
+
 func createIndexes(tx *sql.Tx) error {
-	for _, idx := range append(assignmentIndexes, asnIndexes...) {
+	all := make([]struct{ name, sql string }, 0, len(assignmentIndexes)+len(asnIndexes)+len(maxMindASNIndexes))
+	all = append(all, assignmentIndexes...)
+	all = append(all, asnIndexes...)
+	all = append(all, maxMindASNIndexes...)
+	for _, idx := range all {
 		if _, err := tx.Exec(idx.sql); err != nil {
 			return err
 		}
@@ -469,6 +501,72 @@ func (s *Store) BulkASNAnnouncements(ctx context.Context, sourceType string, sou
 	return tx.Commit()
 }
 
+// MaxMindASNWriter inserts MaxMind ASN announcements in one transaction.
+type MaxMindASNWriter struct {
+	ctx   context.Context
+	stmt  *sql.Stmt
+	Count int64
+}
+
+// Insert adds an announcement. Invalid types, ASN 0, and ranges outside the
+// address family are rejected; duplicate prefixes are ignored.
+func (w *MaxMindASNWriter) Insert(a ASNAnnouncement) error {
+	if a.NumType != netutil.IPv4 && a.NumType != netutil.IPv6 {
+		return fmt.Errorf("invalid MaxMind ASN number type %q", a.NumType)
+	}
+	if a.ASN == 0 {
+		return errors.New("invalid MaxMind ASN 0")
+	}
+	if err := validateRange(a.Start, a.End, a.NumType); err != nil {
+		return err
+	}
+	res, err := w.stmt.ExecContext(w.ctx,
+		netutil.HexKey(a.Start, a.NumType),
+		netutil.NextKey(a.End, a.NumType),
+		string(a.NumType),
+		int64(a.ASN),
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		w.Count++
+	}
+	return nil
+}
+
+// BulkMaxMindASN atomically replaces the MaxMind ASN table.
+func (s *Store) BulkMaxMindASN(ctx context.Context, fn func(*MaxMindASNWriter) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM maxmind_asn_assignments`); err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO maxmind_asn_assignments
+		(start_hex, next_start_hex, num_type, as_num)
+		VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	w := &MaxMindASNWriter{ctx: ctx, stmt: stmt}
+	if err := fn(w); err != nil {
+		_ = stmt.Close()
+		return err
+	}
+	if w.Count == 0 {
+		_ = stmt.Close()
+		return errors.New("no MaxMind ASN announcements parsed; cache left unchanged")
+	}
+	if err := stmt.Close(); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // BulkASNDescriptions atomically replaces the ASN description table.
 func (s *Store) BulkASNDescriptions(ctx context.Context, fn func(insert func(asn uint32, source, description string) error) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -506,12 +604,29 @@ func (s *Store) BulkASNDescriptions(ctx context.Context, fn func(insert func(asn
 }
 
 // AssignmentsByCountry returns [start,end] assignments for a country.
-func (s *Store) AssignmentsByCountry(ctx context.Context, numType netutil.NumType, country string, sources []string) ([]Assignment, error) {
+func (s *Store) AssignmentsByCountry(ctx context.Context, numType netutil.NumType, country string, sources []string, filter AssignmentFilter) ([]Assignment, error) {
+	return s.assignmentsByCountry(ctx, numType, country, sources, filter, "start_hex")
+}
+
+// assignmentsByCountry returns a country's assignments ordered by orderBy,
+// which must be a trusted column list, never caller input.
+func (s *Store) assignmentsByCountry(ctx context.Context, numType netutil.NumType, country string, sources []string, filter AssignmentFilter, orderBy string) ([]Assignment, error) {
 	q := `SELECT start_hex, next_start_hex, num_type, country_code, source_type, source_name, status, start_date, opaque_id
 		FROM assignments WHERE num_type=? AND country_code=?`
 	args := []any{string(numType), country}
 	q, args = addSourceFilter(q, args, sources)
-	q += ` ORDER BY start_hex`
+	if len(filter.Statuses) > 0 {
+		ph := make([]string, len(filter.Statuses))
+		for i, status := range filter.Statuses {
+			ph[i] = "?"
+			args = append(args, status)
+		}
+		q += ` AND status IN (` + strings.Join(ph, ",") + `)`
+	}
+	if filter.ExcludeReserved {
+		q += ` AND country_code NOT IN ('','*') AND status NOT IN ('reserved','available')`
+	}
+	q += ` ORDER BY ` + orderBy
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -608,21 +723,32 @@ func (s *Store) overlaps(ctx context.Context, q queryer, numType netutil.NumType
 // secondSources for a country. Exact self-pairs are included; callers that
 // want conflict-only output should use Conflicts.
 func (s *Store) Compare(ctx context.Context, country string, numTypes []netutil.NumType, firstSources, secondSources []string) ([]Comparison, error) {
-	return s.compareEach(ctx, country, numTypes, firstSources, secondSources, false)
+	var out []Comparison
+	err := s.EachComparison(ctx, country, numTypes, firstSources, secondSources, false, func(c Comparison) error {
+		out = append(out, c)
+		return nil
+	})
+	return out, err
 }
 
 // Conflicts returns overlapping pairs whose second assignment has a different
 // country code. This is the useful comparison mode for large LIR datasets.
 func (s *Store) Conflicts(ctx context.Context, country string, numTypes []netutil.NumType, firstSources, secondSources []string) ([]Comparison, error) {
-	return s.compareEach(ctx, country, numTypes, firstSources, secondSources, true)
+	var out []Comparison
+	err := s.EachComparison(ctx, country, numTypes, firstSources, secondSources, true, func(c Comparison) error {
+		out = append(out, c)
+		return nil
+	})
+	return out, err
 }
 
-func (s *Store) compareEach(ctx context.Context, country string, numTypes []netutil.NumType, firstSources, secondSources []string, conflictOnly bool) ([]Comparison, error) {
-	var out []Comparison
+// EachComparison streams overlapping pairs between firstSources and
+// secondSources in (num_type, first source, first start, second start) order.
+func (s *Store) EachComparison(ctx context.Context, country string, numTypes []netutil.NumType, firstSources, secondSources []string, conflictOnly bool, fn func(Comparison) error) error {
 	for _, numType := range numTypes {
-		firsts, err := s.AssignmentsByCountry(ctx, numType, country, firstSources)
+		firsts, err := s.assignmentsByCountry(ctx, numType, country, firstSources, AssignmentFilter{}, "source_type, start_hex")
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if len(firsts) == 0 {
 			continue
@@ -638,7 +764,7 @@ func (s *Store) compareEach(ctx context.Context, country string, numTypes []netu
 		q += ` ORDER BY start_hex`
 		rows, err := s.db.QueryContext(ctx, q, args...)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		var pending *Assignment
@@ -652,7 +778,7 @@ func (s *Store) compareEach(ctx context.Context, country string, numTypes []netu
 			if i%1000 == 0 {
 				if err := ctx.Err(); err != nil {
 					rows.Close()
-					return nil, err
+					return err
 				}
 			}
 			// Drop ranges that ended before this first range starts. Since
@@ -675,24 +801,24 @@ func (s *Store) compareEach(ctx context.Context, country string, numTypes []netu
 						var startHex, nextHex, numTypeStr string
 						if err := rows.Scan(&startHex, &nextHex, &numTypeStr, &sec.CountryCode, &sec.SourceType, &sec.SourceName, &sec.Status, &sec.StartDate, &sec.OpaqueID); err != nil {
 							rows.Close()
-							return nil, err
+							return err
 						}
 						sec.NumType = netutil.NumType(numTypeStr)
 						sec.Start, err = netutil.ParseHexKey(startHex)
 						if err != nil {
 							rows.Close()
-							return nil, err
+							return err
 						}
 						next, err := netutil.ParseHexKey(nextHex)
 						if err != nil {
 							rows.Close()
-							return nil, err
+							return err
 						}
 						sec.End = new(big.Int).Sub(next, big.NewInt(1))
 					} else {
 						exhausted = true
 						if err := closeRows(); err != nil {
-							return nil, err
+							return err
 						}
 						break
 					}
@@ -711,16 +837,19 @@ func (s *Store) compareEach(ctx context.Context, country string, numTypes []netu
 				}
 			}
 			for _, sec := range active {
-				out = append(out, Comparison{First: first, Second: sec})
+				if err := fn(Comparison{First: first, Second: sec}); err != nil {
+					rows.Close()
+					return err
+				}
 			}
 		}
 		if !exhausted {
 			if err := closeRows(); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // OrgForIP returns announcements covering an address, with descriptions.
@@ -822,6 +951,43 @@ func (s *Store) AnnouncementsForASN(ctx context.Context, asn uint32, numType net
 	return out, rows.Err()
 }
 
+// MaxMindASNCount returns how many MaxMind prefixes an ASN originates.
+func (s *Store) MaxMindASNCount(ctx context.Context, asn uint32) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM maxmind_asn_assignments WHERE as_num=?`, int64(asn)).Scan(&n)
+	return n, err
+}
+
+// MaxMindASNForASN returns a MaxMind ASN's prefixes of one number type,
+// ordered by start.
+func (s *Store) MaxMindASNForASN(ctx context.Context, asn uint32, numType netutil.NumType) ([]ASNAnnouncement, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT start_hex, next_start_hex, num_type, as_num
+		FROM maxmind_asn_assignments WHERE as_num=? AND num_type=? ORDER BY start_hex`, int64(asn), string(numType))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ASNAnnouncement
+	for rows.Next() {
+		var (
+			startHex, nextHex string
+			asnVal            int64
+			a                 ASNAnnouncement
+		)
+		if err := rows.Scan(&startHex, &nextHex, &a.NumType, &asnVal); err != nil {
+			return nil, err
+		}
+		a.ASN = uint32(asnVal)
+		a.Start, _ = netutil.ParseHexKey(startHex)
+		next, _ := netutil.ParseHexKey(nextHex)
+		a.End = new(big.Int).Sub(next, big.NewInt(1))
+		a.SourceType = sources.SourceMaxMind
+		a.SourceName = sources.SourceMaxMind
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // CountAssignments returns the number of delegation/GeoIP records.
 func (s *Store) CountAssignments(ctx context.Context) (int64, error) {
 	var n int64
@@ -912,6 +1078,26 @@ func (s *Store) Stats(ctx context.Context) ([]Stat, error) {
 		out = append(out, st)
 	}
 	if err := bgpRows.Err(); err != nil {
+		return nil, err
+	}
+	mmRows, err := s.db.QueryContext(ctx, `SELECT num_type, COUNT(*) FROM maxmind_asn_assignments GROUP BY num_type ORDER BY num_type`)
+	if err != nil {
+		return nil, err
+	}
+	for mmRows.Next() {
+		var st Stat
+		if err := mmRows.Scan(&st.NumType, &st.Count); err != nil {
+			mmRows.Close()
+			return nil, err
+		}
+		st.SourceType = sources.SourceMaxMind
+		out = append(out, st)
+	}
+	if err := mmRows.Err(); err != nil {
+		mmRows.Close()
+		return nil, err
+	}
+	if err := mmRows.Close(); err != nil {
 		return nil, err
 	}
 	var desc int64
