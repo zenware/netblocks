@@ -284,6 +284,12 @@ width makes `end+1` representable even for `255.255.255.255/32` and
 All bulk imports run in a single transaction and rebuild indexes afterward, so
 an interrupted import leaves the previous cache intact.
 
+## Roadmap
+
+Post-parity work — IPv6 BGP data, ASN prefix listings, CI, cache provenance,
+MaxMind ASN, and packaging — is tracked with implementation notes and
+acceptance criteria in [ROADMAP.md](ROADMAP.md).
+
 ## Development
 
 ```sh
