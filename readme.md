@@ -108,6 +108,17 @@ Notes:
 | | `--lookup-org-by-ip IP` | ASN and organization for an IP |
 | | `--lookup-org-by-range` | Announcements contained in `--range-start`/`--range-end` |
 
+`-a` prints a one-line summary by design; a large ASN can originate thousands
+of prefixes. Add `--prefixes` to list the announcements per family, and
+`--prefix-limit N` to cap the rows listed per family (`0`, the default, means
+all). `--json -a` always includes the full `announcements` array:
+
+```sh
+./netblocks -a AS15169 --prefixes
+./netblocks -a AS15169 --prefixes --prefix-limit 5
+./netblocks --json -a AS15169
+```
+
 `type` is `ipv4`, `ipv6`, or `asn`. Without it, all three are listed.
 
 `-t` and `-n` print one CIDR or ASN per line, which is convenient for shell
@@ -158,8 +169,8 @@ blockfinder.
 
 ## JSON output
 
-`--json` applies to lookup, compare, stats, country-list, and reserved-count
-modes. Example:
+`--json` applies to lookup, compare, stats, info, country-list, and
+reserved-count modes. Example:
 
 ```sh
 $ ./netblocks --json -t MM
@@ -221,8 +232,16 @@ MaxMind format. Empty datasets produce a warning and no file.
     --list-cc                list known ISO country codes
     --reserved-count         count reserved/available RIR records
     --stats                  show cache row counts
+    --info                   show cache provenance, sizes, and file ages
     --version                print version
 ```
+
+`--info` reports the schema version, absolute database path and size, row
+counts, import timestamps, and every cached source file with its age. It also
+warns when a cached RIR file is newer than the recorded RIR import, which
+usually means `-d` is due. `--json --info` emits the same data as one object
+(`schema_version`, `database_path`, `database_size`, `rows`, `imports`,
+`files`, and optional `warnings`).
 
 ## Data sources
 
