@@ -1081,3 +1081,92 @@ func TestTabularOutput(t *testing.T) {
 		t.Fatalf("reverse tsv bgp row = %v", bgp)
 	}
 }
+
+func TestFindASN(t *testing.T) {
+	dir := setupCache(t)
+	html := `<a href="/cgi-bin/as-report?as=AS15169&view=2.0">AS15169</a> GOOGLE, US` +
+		"\n" + `<a href="/cgi-bin/as-report?as=AS13335&view=2.0">AS13335</a> CLOUDFLARENET, US`
+	if err := os.WriteFile(filepath.Join(dir, "autnums.html"), []byte(html), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runApp(t, dir, app.Options{Mode: "reload-asn-descriptions"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runApp(t, dir, app.Options{Mode: "find-asn", FindASN: "google"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "AS15169\tGOOGLE, US") {
+		t.Fatalf("find text = %q", out)
+	}
+	if strings.Contains(out, "AS13335") {
+		t.Fatalf("find text matched wrong ASN: %q", out)
+	}
+
+	raw, _, err := runApp(t, dir, app.Options{Mode: "find-asn", FindASN: "us", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Query     string `json:"query"`
+		Match     string `json:"match"`
+		Truncated bool   `json:"truncated"`
+		Results   []struct {
+			ASN         uint32 `json:"asn"`
+			Description string `json:"description"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if decoded.Query != "find-asn" || decoded.Match != "us" || decoded.Truncated {
+		t.Fatalf("find json = %+v", decoded)
+	}
+	if len(decoded.Results) != 2 || decoded.Results[0].ASN != 13335 || decoded.Results[1].ASN != 15169 {
+		t.Fatalf("find json results = %+v", decoded.Results)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "find-asn", FindASN: "us", FindLimit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "AS13335") || strings.Contains(out, "AS15169") {
+		t.Fatalf("limited find text = %q", out)
+	}
+	if !strings.Contains(out, "showing first 1 matches") {
+		t.Fatalf("limited find text missing truncation: %q", out)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "find-asn", FindASN: "us", FindLimit: 1, JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Results = nil
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if !decoded.Truncated || len(decoded.Results) != 1 {
+		t.Fatalf("limited find json = %+v", decoded)
+	}
+
+	out, _, err = runApp(t, dir, app.Options{Mode: "find-asn", FindASN: "no-such-org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `No ASN descriptions matched "no-such-org".`) {
+		t.Fatalf("no-match find text = %q", out)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "find-asn", FindASN: "google", CSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseTable(t, raw, ',')
+	if len(rows) != 2 || rows[0][0] != "asn" || rows[0][1] != "description" {
+		t.Fatalf("find csv = %q", raw)
+	}
+	if rows[1][0] != "15169" || rows[1][1] != "GOOGLE, US" {
+		t.Fatalf("find csv row = %v", rows[1])
+	}
+}

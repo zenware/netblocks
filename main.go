@@ -60,6 +60,8 @@ func run(args []string) int {
 		ipv4            string
 		ipv6            string
 		asn             string
+		findASN         string
+		findLimit       int
 		prefixes        bool
 		prefixLimit     int
 		input           string
@@ -149,6 +151,8 @@ func run(args []string) int {
 	fs.StringVar(&ipv6, "ipv6", "", "look up the country for an IPv6 address")
 	fs.StringVar(&asn, "a", "", "look up the country and description for an ASN")
 	fs.StringVar(&asn, "asn", "", "look up the country and description for an ASN")
+	fs.StringVar(&findASN, "find-asn", "", "find ASNs whose description matches NAME")
+	fs.IntVar(&findLimit, "find-limit", 50, "maximum ASN matches shown (0 = all)")
 	fs.BoolVar(&prefixes, "prefixes", false, "list announced prefixes in ASN lookup")
 	fs.IntVar(&prefixLimit, "prefix-limit", 0, "maximum announced prefixes listed per address family (0 = all)")
 	fs.StringVar(&input, "input", "", "read lookup values from a file (- for stdin)")
@@ -245,6 +249,7 @@ func run(args []string) int {
 		selected = append(selected, "ip")
 	}
 	add("asn", set["a"] || set["asn"] || asn != "")
+	add("find-asn", findASN != "")
 	add("code", set["t"] || set["code"] || set["cc"] || code != "" || legacyCC != "")
 	add("name", set["n"] || set["name"] || name != "")
 	add("compare", set["p"] || set["compare"] || compare != "")
@@ -314,6 +319,8 @@ func run(args []string) int {
 		GeoIPASNv6File: geoASNv6,
 		IP:             firstNonEmpty(ipv4, ipv6),
 		ASN:            asn,
+		FindASN:        findASN,
+		FindLimit:      findLimit,
 		Prefixes:       prefixes,
 		PrefixLimit:    prefixLimit,
 		Code:           firstNonEmpty(code, legacyCC),
@@ -353,6 +360,14 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "netblocks: --status and --exclude-reserved require -t/--code or -n/--name")
 		return 2
 	}
+	if findLimit < 0 {
+		fmt.Fprintln(os.Stderr, "netblocks: --find-limit must be >= 0")
+		return 2
+	}
+	if set["find-limit"] && opts.Mode != "find-asn" {
+		fmt.Fprintln(os.Stderr, "netblocks: --find-limit requires --find-asn")
+		return 2
+	}
 	if csvOut && tsvOut {
 		fmt.Fprintln(os.Stderr, "netblocks: --csv and --tsv are mutually exclusive")
 		return 2
@@ -361,8 +376,8 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "netblocks: --csv/--tsv cannot be combined with --json or --jsonl")
 		return 2
 	}
-	if (csvOut || tsvOut) && opts.Mode != "code" && opts.Mode != "name" && opts.Mode != "ip" {
-		fmt.Fprintln(os.Stderr, "netblocks: --csv/--tsv require -t, -n, -4, or -6")
+	if (csvOut || tsvOut) && opts.Mode != "code" && opts.Mode != "name" && opts.Mode != "ip" && opts.Mode != "find-asn" {
+		fmt.Fprintln(os.Stderr, "netblocks: --csv/--tsv require -t, -n, -4, -6, or --find-asn")
 		return 2
 	}
 	if set["code"] || set["cc"] || set["t"] {
@@ -486,6 +501,8 @@ Lookup modes:
   -a, --asn ASN               look up country/description for an ASN
       --prefixes              list announced prefixes in ASN lookup
       --prefix-limit N        max prefixes listed per family (0 = all)
+      --find-asn NAME         find ASNs whose description matches NAME
+      --find-limit N          max ASN matches (default 50, 0 = all)
   -t, --code CC[:type]        list allocations for a country
   -n, --name NAME[:type]      list allocations for a country name
       --status LIST           only include statuses with -t/-n (allocated,assigned,...)
@@ -511,8 +528,8 @@ Options:
   -v, --verbose               be verbose
       --user-agent VALUE      User-Agent used when fetching
       --json                  machine-readable output for lookups
-      --csv                   CSV output for -t/-n/-4/-6
-      --tsv                   TSV output for -t/-n/-4/-6
+      --csv                   CSV output for -t/-n/-4/-6/--find-asn
+      --tsv                   TSV output for -t/-n/-4/-6/--find-asn
       --input FILE            read lookup values from FILE (- for stdin)
       --input-type TYPE       input type for --input: ip, asn, or country
       --jsonl                 one JSON object per input line

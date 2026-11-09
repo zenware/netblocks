@@ -58,6 +58,8 @@ type Options struct {
 
 	IP             string
 	ASN            string
+	FindASN        string
+	FindLimit      int
 	Prefixes       bool
 	PrefixLimit    int
 	Code           string
@@ -184,6 +186,8 @@ func Run(ctx context.Context, opts Options) error {
 		return a.lookupIP(ctx)
 	case "asn":
 		return a.lookupASN(ctx)
+	case "find-asn":
+		return a.findASN(ctx)
 	case "compare":
 		return a.compare(ctx)
 	case "batch":

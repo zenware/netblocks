@@ -19,14 +19,11 @@ listed in intended implementation order; packaging is deliberately last.
 
 ## Low priority
 
-1. **ASN search**: `--find-asn NAME` over `asn_descriptions`, ideally with
-   SQLite FTS5 instead of `LIKE` scans.
-
-2. **Schema migrations**: currently a schema-version mismatch recreates the
+1. **Schema migrations**: currently a schema-version mismatch recreates the
    database. Acceptable for a cache, but a migration path would avoid a
    re-import for users with large LIR/BGP caches.
 
-3. **Packaging**: goreleaser, release checksums, shell completions, man page,
+2. **Packaging**: goreleaser, release checksums, shell completions, man page,
    Docker image, version/commit/date via `-ldflags`.
 
 ## Known limitations
@@ -34,6 +31,8 @@ listed in intended implementation order; packaging is deliberately last.
 - MaxMind's licensed download path is covered by synthetic GeoLite2 zips, not
   a live licensed fetch.
 - The default RouteViews snapshot contains no IPv6 announcements.
+- ASN search uses a `LIKE` scan over `asn_descriptions`, not an FTS5 index.
+  Terms are case-insensitive ASCII substrings and must all match.
 - Integrity verification is MD5-only. As of 2026-11-09 APNIC, RIPE NCC,
   ARIN, AFRINIC, LACNIC, and RIPE's dbase split publish only `.md5` files;
   their `.sha256`, `.sha256sum`, `.sha256.txt`, and `.sha512` endpoints all

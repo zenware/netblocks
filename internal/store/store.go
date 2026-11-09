@@ -905,6 +905,12 @@ func scanOrgs(rows *sql.Rows) ([]Org, error) {
 	return out, rows.Err()
 }
 
+// ASNDescriptionMatch is one ASN description search result.
+type ASNDescriptionMatch struct {
+	ASN         uint32
+	Description string
+}
+
 // ASNDescription returns the best description for an ASN.
 func (s *Store) ASNDescription(ctx context.Context, asn uint32) (string, error) {
 	var description string
@@ -914,6 +920,58 @@ func (s *Store) ASNDescription(ctx context.Context, asn uint32) (string, error) 
 		return "", nil
 	}
 	return description, err
+}
+
+// FindASNDescriptions returns ASNs whose best description contains every term,
+// ordered by ASN. limit <= 0 means no limit.
+func (s *Store) FindASNDescriptions(ctx context.Context, terms []string, limit int) ([]ASNDescriptionMatch, error) {
+	if len(terms) == 0 {
+		return nil, errors.New("empty ASN search pattern")
+	}
+	clauses := make([]string, len(terms))
+	args := make([]any, 0, len(terms)+1)
+	for i, term := range terms {
+		clauses[i] = `d.description LIKE ? ESCAPE '\'`
+		args = append(args, "%"+escapeLike(term)+"%")
+	}
+	q := `SELECT d.as_num, d.description
+		FROM asn_descriptions d
+		WHERE ` + strings.Join(clauses, ` AND `) + `
+		  AND d.source_name = (
+		      SELECT x.source_name FROM asn_descriptions x WHERE x.as_num = d.as_num
+		      ORDER BY CASE x.source_name WHEN 'cidr_report' THEN 0 ELSE 1 END, x.source_name
+		      LIMIT 1)
+		ORDER BY d.as_num`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ASNDescriptionMatch
+	for rows.Next() {
+		var (
+			asn   int64
+			match ASNDescriptionMatch
+		)
+		if err := rows.Scan(&asn, &match.Description); err != nil {
+			return nil, err
+		}
+		match.ASN = uint32(asn)
+		out = append(out, match)
+	}
+	return out, rows.Err()
+}
+
+// escapeLike makes a search term literal inside a LIKE pattern.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 // ASNAnnouncementCount returns how many prefixes an ASN originates.

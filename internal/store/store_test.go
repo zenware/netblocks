@@ -546,3 +546,69 @@ func TestAssignmentFilter(t *testing.T) {
 		t.Fatalf("assigned start = %s", start)
 	}
 }
+
+func TestFindASNDescriptions(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	err = st.BulkASNDescriptions(ctx, func(insert func(asn uint32, source, description string) error) error {
+		rows := []struct {
+			asn          uint32
+			source, desc string
+		}{
+			{15169, "cidr_report", "GOOGLE, US"},
+			{15169, "other", "GOOGLE LLC"},
+			{13335, "cidr_report", "CLOUDFLARENET, US"},
+			{64500, "cidr_report", "TEST-NET 100%"},
+		}
+		for _, row := range rows {
+			if err := insert(row.asn, row.source, row.desc); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	find := func(terms ...string) []store.ASNDescriptionMatch {
+		t.Helper()
+		matches, err := st.FindASNDescriptions(ctx, terms, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return matches
+	}
+
+	google := find("google")
+	if len(google) != 1 || google[0].ASN != 15169 || google[0].Description != "GOOGLE, US" {
+		t.Fatalf("google = %+v", google)
+	}
+	us := find("us")
+	if len(us) != 2 || us[0].ASN != 13335 || us[1].ASN != 15169 {
+		t.Fatalf("us = %+v", us)
+	}
+	multi := find("cloudflare", "us")
+	if len(multi) != 1 || multi[0].ASN != 13335 {
+		t.Fatalf("multi = %+v", multi)
+	}
+	percent := find("100%")
+	if len(percent) != 1 || percent[0].ASN != 64500 {
+		t.Fatalf("percent = %+v", percent)
+	}
+	if none := find("nope"); len(none) != 0 {
+		t.Fatalf("nope = %+v", none)
+	}
+	limited, err := st.FindASNDescriptions(ctx, []string{"us"}, 1)
+	if err != nil || len(limited) != 1 || limited[0].ASN != 13335 {
+		t.Fatalf("limited = %+v, %v", limited, err)
+	}
+	if _, err := st.FindASNDescriptions(ctx, nil, 0); err == nil {
+		t.Fatal("empty term list should fail")
+	}
+}

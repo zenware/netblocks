@@ -113,6 +113,7 @@ Notes:
 | `-4 ADDR` | `--ipv4 ADDR` | Reverse lookup an IPv4 address |
 | `-6 ADDR` | `--ipv6 ADDR` | Reverse lookup an IPv6 address |
 | `-a ASN` | `--asn ASN` | Country and description for an ASN (`AS15169` or `15169`) |
+| | `--find-asn NAME` | Find ASNs whose description matches NAME |
 | `-t CC[:type]` | `--code CC[:type]` | List allocations for a country code |
 | `-n NAME[:type]` | `--name NAME[:type]` | List allocations for a country name |
 | `-p CC` | `--compare CC` | Compare assignments across sources; conflicts only by default |
@@ -129,6 +130,19 @@ all). `--json -a` always includes the full `announcements` array:
 ./netblocks -a AS15169 --prefixes
 ./netblocks -a AS15169 --prefixes --prefix-limit 5
 ./netblocks --json -a AS15169
+```
+
+`--find-asn NAME` searches cached cidr-report descriptions. It prints one
+`AS<n>\t<description>` line per match, ordered by ASN. Whitespace-separated
+terms must all appear, matched case-insensitively as substrings
+(`--find-asn "cloudflare us"`). `--find-limit N` caps the output (default 50,
+`0` means all) and text output notes when results were truncated. `--json`,
+`--csv`, and `--tsv` are supported:
+
+```sh
+./netblocks --find-asn google
+./netblocks --find-asn "cloudflare us" --find-limit 10
+./netblocks --find-asn google --json
 ```
 
 `type` is `ipv4`, `ipv6`, or `asn`. Without it, all three are listed.
@@ -236,10 +250,10 @@ Reverse IP lookups include each source's result and any BGP announcement:
 
 ## CSV and TSV output
 
-`--csv` and `--tsv` apply to country listings (`-t`, `-n`) and reverse IP
-lookups (`-4`, `-6`). They are mutually exclusive with each other and with
-`--json`/`--jsonl`, and are rejected for batch, ASN, compare, cache, and
-export modes. A header row is always written.
+`--csv` and `--tsv` apply to country listings (`-t`, `-n`), reverse IP
+lookups (`-4`, `-6`), and ASN search (`--find-asn`). They are mutually
+exclusive with each other and with `--json`/`--jsonl`, and are rejected for
+batch, ASN, compare, cache, and export modes. A header row is always written.
 
 Country listings emit one row per printed prefix, so merge and status filters
 apply exactly as in text output:
@@ -264,6 +278,14 @@ ip,family,source,country_code,country_name,network,asn,description,conflict
 `conflict` is `true` when MaxMind and RIR disagree about the country. Fields
 containing commas, quotes, or newlines are quoted per RFC 4180; `--tsv` uses
 tab delimiters instead.
+
+ASN searches emit `asn,description` rows:
+
+```sh
+$ ./netblocks --find-asn google --csv
+asn,description
+15169,"GOOGLE, US"
+```
 
 ## Export
 
@@ -298,6 +320,8 @@ MaxMind format. Empty datasets produce a warning and no file.
     --input-type TYPE        batch input type: ip, asn, or country
     --source LIST            rir,lir,maxmind (or all)
     --asn-source LIST        routeviews,routeviews6 (or all; default routeviews)
+    --find-asn NAME          find ASNs whose description matches NAME
+    --find-limit N           max ASN matches (default 50, 0 = all)
     --status LIST            keep these RIR statuses with -t/-n
     --exclude-reserved       drop reserved/available records with -t/-n
     --compare-all            show all overlaps in -p, not just conflicts
@@ -388,8 +412,8 @@ an interrupted import leaves the previous cache intact.
 
 ## Roadmap
 
-Post-parity work — ASN search, schema migrations, and packaging — is tracked
-with implementation notes and acceptance criteria in
+Post-parity work — schema migrations and packaging — is tracked with
+implementation notes and acceptance criteria in
 [ROADMAP.md](ROADMAP.md).
 
 ## Development
