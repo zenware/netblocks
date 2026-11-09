@@ -388,8 +388,8 @@ an interrupted import leaves the previous cache intact.
 
 ## Roadmap
 
-Post-parity work — checksum hardening, ASN search, schema migrations, and
-packaging — is tracked with implementation notes and acceptance criteria in
+Post-parity work — ASN search, schema migrations, and packaging — is tracked
+with implementation notes and acceptance criteria in
 [ROADMAP.md](ROADMAP.md).
 
 ## Development
