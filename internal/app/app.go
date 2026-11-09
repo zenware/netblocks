@@ -41,6 +41,8 @@ type Options struct {
 	Verbose   bool
 	Quiet     bool
 	JSON      bool
+	CSV       bool
+	TSV       bool
 	Offline   bool
 	Retries   int
 

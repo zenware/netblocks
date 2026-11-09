@@ -4,7 +4,8 @@
 [blockfinder](https://github.com/ioerror/blockfinder): every original cache
 and lookup mode exists, and the original's dead MaxMind/export paths now work.
 This file tracks additive work that is worth doing next. It is written so a
-future session can pick up an item without re-deriving the design.
+future session can pick up an item without re-deriving the design. Items are
+listed in intended implementation order; packaging is deliberately last.
 
 ## Completed baseline
 
@@ -16,184 +17,34 @@ future session can pick up an item without re-deriving the design.
 - Country/name, reverse IP, ASN, org, compare, stats, and export modes.
 - Text and JSON output, offline operation, merge/expansion controls.
 
-## High priority
-
-### 1. IPv6 BGP source and IPv6 ASN export
-
-**Current state**
-
-- `internal/parse/bgp.go` already parses IPv6 prefixes.
-- `internal/sources/sources.go` has one hard-coded BGP URL,
-  `ASNAssignmentURL`, pointing at the IPv4-only
-  `oix-full-snapshot-latest.dat.bz2` snapshot.
-- Live import produced no IPv6 announcements, so
-  `--lookup-org-by-ip` on an IPv6 address returns nothing.
-- `--export-geoip` writes ASN data only for IPv4 because `internal/app/app.go`
-  calls `export.ASNCSV(..., netutil.IPv4)` once.
-
-**Work**
-
-- Add a list of BGP sources instead of one URL. Evaluate the current
-  RouteViews `route-views6` RIB and RIPE RIS. RouteViews text snapshots can
-  reuse `parse.BGP`; RIPE RIS `bview` data is MRT/binary and needs a new
-  parser or an MRT dependency.
-- Verify the chosen IPv6 URL before hard-coding it. Keep the existing IPv4
-  URL as the default so current behavior does not change.
-- Make source selection explicit (`--asn-source routeviews,routeviews6`, or a
-  `sources.BGPFiles` slice). `asn_assignments` is already keyed by
-  `(num_type, start_hex, next_start_hex)`, so IPv4 and IPv6 coexist.
-- Add `--geoip-asn-v6-file` and call `export.ASNCSV(ctx, st, f, netutil.IPv6)`.
-- Make `--stats` show separate IPv4/IPv6 BGP counts, or add per-type counts to
-  `Store.Stats`.
-
-**Acceptance**
-
-- A live `--lookup-org-by-ip 2001:4860:4860::8888` returns an ASN and
-  description.
-- An IPv6 ASN export contains prefixes instead of being empty.
-- Existing IPv4 org lookups and exports are unchanged.
-
-### 2. ASN → announced prefixes
-
-**Current state**
-
-- `Store.ASNAnnouncementCount` returns only a count.
-- `app.lookupASN` prints `AS announced prefixes: N` but not the prefixes
-  themselves.
-- `Store.OrgForIP`/`OrgForRange` already expose individual announcements.
-
-**Work**
-
-- Add `Store.AnnouncementsForASN(ctx, asn uint32, numType netutil.NumType)`
-  returning `[]ASNAnnouncement`, ordered by start. Reuse the existing
-  `asn_assignments` indexes (`idx_asn_assignments_asn`).
-- Print the prefixes in `-a` only when `--prefixes` is set; a large ASN can
-  have thousands of prefixes and the current one-line summary is intentional.
-- Include an `announcements` array in `--json -a` output. Each entry should
-  include the CIDR/range and source. Consider a `--limit` for JSON.
-- Add tests for an ASN with multiple prefixes and for an ASN absent from BGP
-  data.
-
-**Acceptance**
-
-- `netblocks -a AS15169 --prefixes` lists IPv4 prefixes.
-- `netblocks --json -a AS15169` contains the same announcements in a
-  machine-readable form.
-- ASN lookup still works when BGP data has not been imported.
-
-### 3. CI and live-data checks
-
-**Current state**
-
-- All checks are run locally; there is no `.github/` directory.
-- `go test ./...`, `go test -race ./...`, `go vet ./...`, and
-  `CGO_ENABLED=0 go build .` are the expected commands.
-
-**Work**
-
-- Add `.github/workflows/ci.yml`:
-  - Linux and macOS, Go 1.26.x.
-  - `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`.
-  - `CGO_ENABLED=0 go build .`.
-  - Optional Windows build-only job (`go build ./...`).
-- Add a separate scheduled or `workflow_dispatch` live-import job:
-  - `-i` (RIR) and `-j` (ASN names) are enough and need no secrets.
-  - Keep LIR/BGP out of the default job: they are large and slow.
-  - MaxMind requires `MAXMIND_LICENSE_KEY`; guard it with a secret check and
-    skip cleanly when absent.
-- Cache the Go module cache; do not cache downloaded RIR files between runs.
-
-**Acceptance**
-
-- Pull requests fail on test, vet, race, or build regressions.
-- The live job proves the RIR and ASN endpoints and parsers still work.
-- No required workflow needs a paid secret.
-
-### 4. Cache provenance and `--info`
-
-**Current state**
-
-- Import timestamps are written with `Store.SetMeta` under:
-  `last_rir_import`, `last_lir_import`, `last_asn_description_import`,
-  `last_asn_assignment_import`, `last_maxmind_import`.
-- There is no way to read them back in the CLI. `Store.GetMeta` was removed
-  during dead-code cleanup and needs to be re-added.
-- `Store.Stats` gives row counts; `cache.Client.Age` gives file ages.
-
-**Work**
-
-- Re-add `Store.GetMeta(ctx, key)`.
-- Extend `--stats` or add `--info` with: schema version, database path and
-  size, row counts, import timestamps, cached source files and ages.
-- Include the same data in `--json`.
-- Warn when the database is older than the cached RIR files, which indicates
-  a stale import.
-
-**Acceptance**
-
-- `netblocks --info` explains exactly what data is present and when it was
-  imported.
-- A fresh cache and a partially populated cache are distinguishable without
-  querying.
-
-## Medium priority
-
-### 5. Compare aggregation and streaming — done
-
-- Default conflict mode groups conflicts per first range by
-  `(second source, second country)` with a count and up to three example
-  ranges, so one RIR block no longer prints hundreds of rows.
-- Text comparisons stream from `Store.EachComparison` instead of buffering
-  every pair; `--compare-all` still prints one line per overlap.
-- `--compare-limit N` caps the conflict groups shown per first range.
-- `--json` comparison detail is unchanged: one object per pair.
-
-### 6. MaxMind ASN database — done
-
-- GeoLite2-ASN CSV import from a zip, a single blocks CSV, or a directory.
-  Organization names are ignored; ASN descriptions still come from cidr-report.
-- `--maxmind-asn` switches `-m`, `-g`, and `-r` to the ASN edition. The data
-  lives in its own `maxmind_asn_assignments` table so BGP and MaxMind prefixes
-  do not collide; the table is created additively without a schema bump.
-- `-a` prefers BGP announcements and falls back to MaxMind when the BGP
-  snapshot has no announcement for the ASN. `--stats` and `--info` report the
-  import and row counts.
-
-### 7. Bulk input and NDJSON — done
-
-- `--input FILE` (or `-` for stdin) with `--input-type ip|asn|country` runs
-  one lookup per line, skipping blank lines and `#` comments.
-- `--json` emits one array of result objects; `--jsonl` emits one object per
-  line.
-- Per-line failures are reported on stderr and the process exits non-zero
-  after every successful result has been written.
-
-### 8. RIR status and special-use filtering — done
-
-- `--status allocated,assigned` filters `-t`/`-n` output by RIR status.
-- `--exclude-reserved` drops `country_code` `''`/`*` and
-  `reserved`/`available` statuses.
-- The IANA special-purpose registry is not integrated; filtering uses the
-  stored status/country columns, the same predicate as `--reserved-count`.
-
 ## Low priority
 
-- **Packaging**: goreleaser, release checksums, shell completions, man page,
-  Docker image, version/commit/date via `-ldflags`.
-- **Checksum hardening**: prefer SHA-256 where a registry publishes it;
-  `.md5` remains only for compatibility.
-- **ASN search**: `--find-asn NAME` over `asn_descriptions`, ideally with
-  SQLite FTS5 instead of `LIKE` scans.
-- **Output formats**: CSV/TSV for country listings and reverse lookups.
-- **Schema migrations**: currently a schema-version mismatch recreates the
-  database. Acceptable for a cache, but a migration path would avoid a
-  re-import for users with large LIR/BGP caches.
+1. **Checksum hardening** — blocked on upstream availability. As of
+   2026-11-09 the RIR and RIPE LIR hosts publish only MD5: the
+   `delegated-*-latest.md5` and `ripe.db.*.gz.md5` files return 200, while
+   `.sha256`, `.sha256sum`, `.sha256.txt`, and `.sha512` return 404 for
+   APNIC, RIPE NCC, ARIN, AFRINIC, and LACNIC. Revisit if a registry starts
+   publishing a stronger digest. A local hardening remains possible without
+   upstream support: re-verify cached payloads against the cached `.md5`
+   before `-d`/`-z` imports.
+
+2. **ASN search**: `--find-asn NAME` over `asn_descriptions`, ideally with
+   SQLite FTS5 instead of `LIKE` scans.
+
+3. **Schema migrations**: currently a schema-version mismatch recreates the
+   database. Acceptable for a cache, but a migration path would avoid a
+   re-import for users with large LIR/BGP caches.
+
+4. **Packaging**: goreleaser, release checksums, shell completions, man page,
+   Docker image, version/commit/date via `-ldflags`.
 
 ## Known limitations
 
 - MaxMind's licensed download path is covered by synthetic GeoLite2 zips, not
   a live licensed fetch.
 - The default RouteViews snapshot contains no IPv6 announcements.
+- Integrity verification is MD5-only because upstream hosts publish no
+  stronger digest.
 - Text comparisons stream in store order and are bounded by `--compare-limit`;
   `--json` still collects every pair for the `comparisons` array.
 - MaxMind ASN data is consulted only by `-a` when BGP has no announcement for
@@ -203,9 +54,3 @@ future session can pick up an item without re-deriving the design.
 - LIR data is RIPE-only, as in blockfinder.
 - `--source` in compare mode selects the baseline; the second side is every
   other assignment source.
-
-## Suggested order
-
-High and medium priority items are complete. What remains is the low-priority
-list: packaging, checksum hardening, ASN search, output formats, and schema
-migrations.

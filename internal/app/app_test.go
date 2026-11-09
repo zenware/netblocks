@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"io"
 	"os"
@@ -959,5 +960,124 @@ func TestCountryFilters(t *testing.T) {
 	}
 	if out != "203.81.64.0/24\n" {
 		t.Fatalf("status reserved MM lir = %q", out)
+	}
+}
+
+func parseTable(t *testing.T, s string, comma rune) [][]string {
+	t.Helper()
+	r := csv.NewReader(strings.NewReader(s))
+	r.Comma = comma
+	rows, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("parse table %q: %v", s, err)
+	}
+	return rows
+}
+
+func TestTabularOutput(t *testing.T) {
+	dir := setupCache(t)
+
+	raw, _, err := runApp(t, dir, app.Options{Mode: "code", Code: "MM", TypeFilter: "ipv4", Merge: true, CSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := parseTable(t, raw, ',')
+	if len(rows) != 3 {
+		t.Fatalf("country csv rows = %d:\n%s", len(rows), raw)
+	}
+	wantHeader := []string{"country_code", "type", "prefix"}
+	for i, want := range wantHeader {
+		if rows[0][i] != want {
+			t.Fatalf("country csv header = %v", rows[0])
+		}
+	}
+	if rows[1][0] != "MM" || rows[1][1] != "ipv4" || rows[1][2] != "203.81.64.0/19" {
+		t.Fatalf("country csv first row = %v", rows[1])
+	}
+	if rows[2][2] != "203.81.160.0/20" {
+		t.Fatalf("country csv second row = %v", rows[2])
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "code", Code: "MM", TypeFilter: "ipv4", Merge: true, TSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsv := parseTable(t, raw, '\t')
+	if len(tsv) != 3 || tsv[1][2] != "203.81.64.0/19" {
+		t.Fatalf("country tsv = %q", raw)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "code", Code: "JP", TypeFilter: "asn", CSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows = parseTable(t, raw, ',')
+	if len(rows) != 2 || rows[1][0] != "JP" || rows[1][1] != "asn" || rows[1][2] != "173" {
+		t.Fatalf("asn csv = %q", raw)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "code", Code: "ZZ", TypeFilter: "ipv4", CSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows = parseTable(t, raw, ',')
+	if len(rows) != 1 {
+		t.Fatalf("empty country csv = %q", raw)
+	}
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "ip", IP: "175.45.176.100", CSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows = parseTable(t, raw, ',')
+	if len(rows) != 2 {
+		t.Fatalf("reverse csv rows = %d:\n%s", len(rows), raw)
+	}
+	wantHeader = []string{"ip", "family", "source", "country_code", "country_name", "network", "asn", "description", "conflict"}
+	for i, want := range wantHeader {
+		if rows[0][i] != want {
+			t.Fatalf("reverse csv header = %v", rows[0])
+		}
+	}
+	rir := rows[1]
+	if rir[0] != "175.45.176.100" || rir[1] != "ipv4" || rir[2] != "rir" || rir[3] != "KP" ||
+		rir[5] != "175.45.176.0/22" || rir[8] != "false" {
+		t.Fatalf("reverse csv rir row = %v", rir)
+	}
+	if !strings.Contains(rir[4], "Korea") {
+		t.Fatalf("reverse csv country name = %q", rir[4])
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(dir, "netblocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end, _, err := netutil.ParsePrefix("175.45.176.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = st.BulkASNAnnouncements(ctx, "bgp_snapshot", []string{"routeviews"}, func(w *store.ASNWriter) error {
+		return w.Insert(store.ASNAnnouncement{
+			Start: start, End: end, NumType: netutil.IPv4, ASN: 64500,
+			SourceType: "bgp_snapshot", SourceName: "routeviews",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	raw, _, err = runApp(t, dir, app.Options{Mode: "ip", IP: "175.45.176.100", TSV: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsv = parseTable(t, raw, '\t')
+	if len(tsv) != 3 {
+		t.Fatalf("reverse tsv rows = %d:\n%s", len(tsv), raw)
+	}
+	bgp := tsv[2]
+	if bgp[2] != "bgp_snapshot" || bgp[5] != "175.45.176.0/24" || bgp[6] != "64500" {
+		t.Fatalf("reverse tsv bgp row = %v", bgp)
 	}
 }

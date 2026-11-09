@@ -33,6 +33,8 @@ func run(args []string) int {
 		userAgent = app.DefaultUserAgent()
 		quiet     bool
 		jsonOut   bool
+		csvOut    bool
+		tsvOut    bool
 		offline   bool
 		retries   = 3
 		timeout   time.Duration
@@ -103,6 +105,8 @@ func run(args []string) int {
 	fs.StringVar(&userAgent, "user-agent", userAgent, "User-Agent used when fetching files")
 	fs.BoolVar(&quiet, "quiet", false, "suppress informational output")
 	fs.BoolVar(&jsonOut, "json", false, "write machine-readable JSON for lookup commands")
+	fs.BoolVar(&csvOut, "csv", false, "write CSV for country and reverse lookups")
+	fs.BoolVar(&tsvOut, "tsv", false, "write TSV for country and reverse lookups")
 	fs.BoolVar(&offline, "offline", false, "never download; use only cached files")
 	fs.IntVar(&retries, "retries", 3, "download retry attempts")
 	fs.DurationVar(&timeout, "timeout", 0, "overall timeout (0 means none)")
@@ -290,6 +294,8 @@ func run(args []string) int {
 		Verbose:        verbose,
 		Quiet:          quiet,
 		JSON:           jsonOut,
+		CSV:            csvOut,
+		TSV:            tsvOut,
 		Input:          input,
 		InputType:      inputType,
 		JSONL:          jsonl,
@@ -345,6 +351,18 @@ func run(args []string) int {
 	opts.ExcludeReserved = excludeReserved
 	if (statusFilter != "" || excludeReserved) && opts.Mode != "code" && opts.Mode != "name" {
 		fmt.Fprintln(os.Stderr, "netblocks: --status and --exclude-reserved require -t/--code or -n/--name")
+		return 2
+	}
+	if csvOut && tsvOut {
+		fmt.Fprintln(os.Stderr, "netblocks: --csv and --tsv are mutually exclusive")
+		return 2
+	}
+	if (csvOut || tsvOut) && (jsonOut || jsonl) {
+		fmt.Fprintln(os.Stderr, "netblocks: --csv/--tsv cannot be combined with --json or --jsonl")
+		return 2
+	}
+	if (csvOut || tsvOut) && opts.Mode != "code" && opts.Mode != "name" && opts.Mode != "ip" {
+		fmt.Fprintln(os.Stderr, "netblocks: --csv/--tsv require -t, -n, -4, or -6")
 		return 2
 	}
 	if set["code"] || set["cc"] || set["t"] {
@@ -493,6 +511,8 @@ Options:
   -v, --verbose               be verbose
       --user-agent VALUE      User-Agent used when fetching
       --json                  machine-readable output for lookups
+      --csv                   CSV output for -t/-n/-4/-6
+      --tsv                   TSV output for -t/-n/-4/-6
       --input FILE            read lookup values from FILE (- for stdin)
       --input-type TYPE       input type for --input: ip, asn, or country
       --jsonl                 one JSON object per input line

@@ -114,6 +114,7 @@ func (a *App) lookupCountry(ctx context.Context, code string) error {
 		result.CountryName = "unassigned/reserved"
 	}
 	var textParts []string
+	var tableRows [][]string
 	found := false
 	for _, numType := range types {
 		list, err := st.AssignmentsByCountry(ctx, numType, code, srcs, store.AssignmentFilter{
@@ -135,7 +136,9 @@ func (a *App) lookupCountry(ctx context.Context, code string) error {
 			}
 			result.ASNs = asns
 			for _, asn := range asns {
-				textParts = append(textParts, fmt.Sprintf("%d", asn))
+				value := fmt.Sprintf("%d", asn)
+				textParts = append(textParts, value)
+				tableRows = append(tableRows, []string{code, string(numType), value})
 			}
 		default:
 			blocks, err := blockStrings(list, a.opts.Merge)
@@ -148,7 +151,13 @@ func (a *App) lookupCountry(ctx context.Context, code string) error {
 				result.IPv6 = blocks
 			}
 			textParts = append(textParts, blocks...)
+			for _, block := range blocks {
+				tableRows = append(tableRows, []string{code, string(numType), block})
+			}
 		}
+	}
+	if a.opts.CSV || a.opts.TSV {
+		return a.writeTable([]string{"country_code", "type", "prefix"}, tableRows)
 	}
 	if a.opts.JSON {
 		return a.writeJSON(result)
@@ -250,6 +259,17 @@ func (a *App) lookupIP(ctx context.Context) error {
 		result.ASN = append(result.ASN, detail)
 	}
 
+	if a.opts.CSV || a.opts.TSV {
+		conflict := fmt.Sprintf("%t", result.Conflict)
+		rows := make([][]string, 0, len(result.Sources)+len(result.ASN))
+		for _, src := range result.Sources {
+			rows = append(rows, []string{ipText, family, src.Source, src.CountryCode, src.CountryName, src.Network, "", "", conflict})
+		}
+		for _, info := range result.ASN {
+			rows = append(rows, []string{ipText, family, sources.SourceBGP, "", "", info.Network, fmt.Sprintf("%d", info.ASN), info.Description, conflict})
+		}
+		return a.writeTable([]string{"ip", "family", "source", "country_code", "country_name", "network", "asn", "description", "conflict"}, rows)
+	}
 	if a.opts.JSON {
 		return a.writeJSON(result)
 	}

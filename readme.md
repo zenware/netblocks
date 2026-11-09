@@ -14,6 +14,7 @@ lookup modes, plus a few things the original could not do:
 - uses a single pure-Go binary with SQLite built in — no Python, no CGO;
 - works offline after the first import;
 - emits JSON for every lookup, plus NDJSON for batch runs;
+- writes CSV or TSV tables for country and reverse lookups;
 - runs batch lookups from a file or stdin (`--input`/`--input-type`);
 - merges adjacent/overlapping blocks by default (`--no-merge` reproduces the
   original per-record output);
@@ -233,6 +234,37 @@ Reverse IP lookups include each source's result and any BGP announcement:
 }
 ```
 
+## CSV and TSV output
+
+`--csv` and `--tsv` apply to country listings (`-t`, `-n`) and reverse IP
+lookups (`-4`, `-6`). They are mutually exclusive with each other and with
+`--json`/`--jsonl`, and are rejected for batch, ASN, compare, cache, and
+export modes. A header row is always written.
+
+Country listings emit one row per printed prefix, so merge and status filters
+apply exactly as in text output:
+
+```sh
+$ ./netblocks -t MM:ipv4 --csv
+country_code,type,prefix
+MM,ipv4,203.81.64.0/19
+MM,ipv4,203.81.160.0/20
+```
+
+Reverse lookups emit one row per source assignment plus one row per BGP
+announcement:
+
+```sh
+$ ./netblocks -4 175.45.176.100 --csv
+ip,family,source,country_code,country_name,network,asn,description,conflict
+175.45.176.100,ipv4,rir,KP,"Korea, Democratic People's Republic of",175.45.176.0/22,,,false
+175.45.176.100,ipv4,bgp_snapshot,,,175.45.176.0/24,64500,,false
+```
+
+`conflict` is `true` when MaxMind and RIR disagree about the country. Fields
+containing commas, quotes, or newlines are quoted per RFC 4180; `--tsv` uses
+tab delimiters instead.
+
 ## Export
 
 ```sh
@@ -259,6 +291,8 @@ MaxMind format. Empty datasets produce a warning and no file.
 -v, --verbose                print download and parse progress
     --user-agent VALUE       User-Agent used when fetching
     --json                   machine-readable output
+    --csv                    CSV output for -t/-n/-4/-6
+    --tsv                    TSV output for -t/-n/-4/-6
     --jsonl                  one JSON object per --input line
     --input FILE             batch lookup values, one per line (- = stdin)
     --input-type TYPE        batch input type: ip, asn, or country
@@ -354,9 +388,9 @@ an interrupted import leaves the previous cache intact.
 
 ## Roadmap
 
-Post-parity work — IPv6 BGP data, ASN prefix listings, CI, cache provenance,
-MaxMind ASN, and packaging — is tracked with implementation notes and
-acceptance criteria in [ROADMAP.md](ROADMAP.md).
+Post-parity work — checksum hardening, ASN search, schema migrations, and
+packaging — is tracked with implementation notes and acceptance criteria in
+[ROADMAP.md](ROADMAP.md).
 
 ## Development
 
